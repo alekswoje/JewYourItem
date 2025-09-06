@@ -27,24 +27,25 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private List<SearchListener> _listeners = new List<SearchListener>();
     private string _sessionIdBuffer = "";
     private List<string> _recentResponses = new List<string>();
-    private const int MaxResponses = 5; // Limit to 5 items
+    private const int MaxResponses = 5;
     private static readonly HttpClient _httpClient = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli });
-    private Queue<(string name, string price, string hideoutToken, int x, int y)> _recentItems = new Queue<(string, string, string, int, int)>(MaxResponses); // Added x, y coordinates
+    private Queue<(string name, string price, string hideoutToken, int x, int y)> _recentItems = new Queue<(string, string, string, int, int)>(MaxResponses);
     private bool _playSound = true;
     private bool _lastHotkeyState = false;
     private DateTime _lastTpTime = DateTime.MinValue;
     private bool _settingsUpdated = false;
-    private SearchListener _activeListener; // Track the active listener for referer URL
+    private SearchListener _activeListener;
+    private Dictionary<JewYourItemInstanceSettings, DateTime> _lastRestartTimes = new Dictionary<JewYourItemInstanceSettings, DateTime>();
+    private const int RestartCooldownSeconds = 60;
 
     public override bool Initialise()
     {
-        _sessionIdBuffer = Settings.SessionId.Value ?? ""; // Sync with saved setting on load
+        _sessionIdBuffer = Settings.SessionId.Value ?? "";
         if (string.IsNullOrEmpty(_sessionIdBuffer))
         {
             LogMessage("Warning: Session ID is empty. Please set it in the settings.");
         }
         
-        // Log ASCII art
         LogMessage("                                                                                                    ");
         LogMessage("::::::::::::::::::::::::::::::::::::::::::::::::::-*@@@@@@%+:::::*=::=-:::::::::::::::::::::::::: ");
         LogMessage("::::::::::::::::::::::::::::::::::::::::::::::=@@@+*@@#=@*+*@#@@@%@+=@+%+::::::::::::::::::::::::: ");
@@ -64,10 +65,9 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         LogMessage("::::::::::::::::%*-:::::=%+::+@%@@@@@#+@@@@%%+*#::::-:::@:=:::@@@@@@@#:=@@@-+@@*%@@*:@::::::::::: ");
         LogMessage(":::::::::::::::@::::::::::+*:::::@@-:---:=@@@@%-::==::#@%*-=*@@-=@++:@*:::+::-@@=-:%@%::::::::::: ");
         LogMessage(":::::::::::::-@:::%-:::::::@-::::@--@=-+@@-:@@@-::::::***@@@@-#@@@@@@@@::@+::::@@@@-*+::::::::::: ");
-        LogMessage(":::::::::::::%:::=@:::::::::%:::=@:%:@@@+@%:@@*:**#--*%+-:==-##::::::+@-::::::::-@*-%:::::::::::: ");
-        LogMessage("::::::::::::@-:::@::::::::::@+::-@:-@=:*@:%+@@::-:-+:::::::::-::-++@+=::::::::::::-@#:::::::::::: ");
-        LogMessage(":::::::::::@::::=+::::::::::-@::+@=:%*:@@:-=@@=:+++-::::::::::::::::::::::::::::::::*#::::::::::: ");
-        LogMessage("::::::::::*+::::#-:::::::::::#=:+@%::::-#%:#@#=:=*=::::::::::::::::::::::::::::::::::-@:::::::::: ");
+        LogMessage(":::::::::::::%:::=@:::::::::%:::=@:-@=:*@:%+@@::-:-+:::::::::-::-++@+=::::::::::::-@#:::::::::::: ");
+        LogMessage("::::::::::::@-:::@::::::::::@+::-@:-@*:@@:-=@@=:+++-::::::::::::::::::::::::::::::::*#::::::::::: ");
+        LogMessage(":::::::::::@::::=+::::::::::-@::+@=:%*:@@:-@@#=:=*=::::::::::::::::::::::::::::::::::-@:::::::::: ");
         LogMessage("::::::::::@-::::@:::::::::::::@::@%*:::-:::@@@*=@==-::-:::::::::::::::::::::::::::::::=@::::::::: ");
         LogMessage(":::::::::=@*:::-@:::::::::::::=@:@-+@:@@::-@@@%@@-@@%:@%*@@=:=+:::::::@@%-:-%%:::::::::##:::::::: ");
         LogMessage(":::::::::*+%:::-@::::::::::::::#=@=:@+::::=@%+*@@=*@@%@:-:::-@*@==:+@@=::::::-@-:--:::::%:::::::: ");
@@ -79,7 +79,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         LogMessage("::::::::##::::::#-#:::::::::::::::-%::::@-==@@@@@@@@%@@@=@=:@%:#@@@-::::::-::+@@=#=::::--::::::::: ");
         LogMessage("::::::::#:::::::@:%::::::::::::::::@-::-:@*@*@#@@*+@=#@@@%:=:@@@-:#++@@@@@%#@*@=:::::::::::::::::: ");
         LogMessage("::::::::@@::::::#-@::::::::::::::::*#::::=@#@@@@@%@%@@@@@*:*#:=@@#+@@#::=@#*@-:::::::::::::::::::: ");
-        LogMessage("::::::::-*:#=::::*#@:::::::::::::::::%-::=@@-@@@@*@*@+@#@*@@-*#::=@@@#@%@@@*@=::::::::::::::::::::: ");
+        LogMessage("::::::::-*:#=::::*#@:::::::::::::::::%-::@@-@@@@*@*@+@#@*@@-*#::=@@@#@%@@@*@=::::::::::::::::::::: ");
         LogMessage("::::::::@-:::::::=#%=::::::::::::::::-@::@@@@*%@@-@@@@@@@@*@@+%@+:::::+@@@#:#@@:::::::::::::::::::: ");
         LogMessage("::::::::-@-::::::::@=#:::::::::::::::::-@=*:=@#+##@@=@@@@@@@@@@@%@@*:::::::-#@#@@-:::::::::::::::::: ");
         LogMessage("::::::::@%:::::::::#-%::::::::::::::::::=@:%-@@%#@#@@@@@+#@@=@@@@@@@@@@@@@@*@@@@++%#*%:::::::::::::: ");
@@ -88,7 +88,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         LogMessage("::::::=+:::::::::::::+*#::::::::::::::::::::#+@:*@+@@**@@@@@@@@@@@%@@@@@@%@@:::::*@==+%+*+-:::::::::: ");
         LogMessage("::::::+=:::::::::::::%@-::::::::::::::::::::#*+:-@@*-@@=#@+@@@@@@#@@@%*@@@:::::-@+:::@:::=+::::::::: ");
         LogMessage("::::::*-:::::::::::::+*-:::::::::::::::::::::@%::-#:@@@+@@@@#@@%@@+@=@@@-::::::-:@%-%=::-@@#:::::::: ");
-        LogMessage("::::::+-::::::::::::::@+=:::::::::::::::::::::*+*%=%:=@+@@@@+=@@@@@@@@%-=::::::::=@@+::+=:::@::::::: ");
+        LogMessage("::::::+-::::::::::::::@+=:::::::::::::::::::::*+*%=%:=@+@@@@+=@@@@@@@@%-=::::::::@@+::+=:::#@::::::: ");
         LogMessage("::::::=+::::::::::::::+##+:::::::::::::::::::::%+*:=*@@:*@#@*@@@@#@@%:+::::::::::::::-+:::#@%::::::: ");
         LogMessage("::::::::::::::::::::::#--::::::::::::::::::-@@%%#::#@%:=#@@@*:::::=%-::::::::::::*%-::+*#-::#:::::: ");
         LogMessage("::::::::::::::::::::::@:::::::::::::::::=@%-::+@#*==-::::::::::::::@::::::%@=-=#@@@:::::::+*:::::: ");
@@ -97,7 +97,6 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         LogMessage(":::::::::::::::::::::::+*::::::::::::::::::*@:::::::::::::::::::::*+=::-@+-@:%+*-=*#=:-@-:::::::: ");
         LogMessage("::::::::::::::::::::::::+%:::::::::::::::::*::::::::+-:::::::::::==#:*:+*::*:::*::+@-:*=::::::::: ");
         LogMessage("::::::::::::::::::::::::::#::::::::::::::::=::::::::#-::::::::::=@%===*-@@@@:-*@@#@-=*-:::::::::: ");
-        LogMessage(":::::::::::::::::::::::::::@=:::::::::::::::::::::::#::::::::=#@=:::::::::::--::::::::::::::::::: ");
         LogMessage("::::::::::::::::::::::::::::##:::::::::::::::::::::#=::::::#*:::::::::::::::::::::::::::::::::::: ");
         LogMessage("                                                                                                    ");
         
@@ -119,9 +118,10 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         public ClientWebSocket WebSocket { get; set; }
         public CancellationTokenSource Cts { get; set; }
         public bool IsRunning { get; set; }
+        public DateTime LastErrorTime { get; set; } = DateTime.MinValue;
         private StringBuilder _messageBuffer = new StringBuilder();
-        private readonly Action<string> _logMessage; // Capture logMessage
-        private readonly Action<string> _logError;   // Capture logError
+        private readonly Action<string> _logMessage;
+        private readonly Action<string> _logError;
 
         public SearchListener(JewYourItem parent, JewYourItemInstanceSettings config, Action<string> logMessage, Action<string> logError)
         {
@@ -137,10 +137,17 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             if (string.IsNullOrEmpty(Config.League.Value) || string.IsNullOrEmpty(Config.SearchId.Value) || string.IsNullOrEmpty(sessionId))
             {
                 _logError("League, Search ID, or Session ID is empty for this search.");
+                LastErrorTime = DateTime.Now;
                 return;
             }
 
             if (IsRunning) return;
+
+            if ((DateTime.Now - LastErrorTime).TotalSeconds < JewYourItem.RestartCooldownSeconds)
+            {
+                _logMessage($"Start skipped for search {Config.SearchId.Value}: Rate limit cooldown active.");
+                return;
+            }
 
             IsRunning = true;
             WebSocket = new ClientWebSocket();
@@ -160,15 +167,17 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 await WebSocket.ConnectAsync(new Uri(url), Cts.Token);
 
                 _logMessage($"Connected to WebSocket for search: {Config.SearchId.Value}");
-                _parent._activeListener = this; // Update active listener
+                _parent._activeListener = this;
                 _ = ReceiveMessagesAsync(_logMessage, _logError, sessionId);
             }
             catch (Exception ex)
             {
                 _logError($"WebSocket connection failed for search {Config.SearchId.Value}: {ex.Message}");
+                LastErrorTime = DateTime.Now;
                 IsRunning = false;
             }
         }
+
 
         private async Task ReceiveMessagesAsync(Action<string> logMessage, Action<string> logError, string sessionId)
         {
@@ -186,6 +195,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                         if (result.MessageType == WebSocketMessageType.Close)
                         {
                             logMessage($"WebSocket closed by server for {Config.SearchId.Value}.");
+                            LastErrorTime = DateTime.Now;
                             return;
                         }
                         if (result.MessageType != WebSocketMessageType.Text)
@@ -206,6 +216,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 catch (Exception ex)
                 {
                     logError($"WebSocket error for {Config.SearchId.Value}: {ex.Message}");
+                    LastErrorTime = DateTime.Now;
                     break;
                 }
             }
@@ -228,6 +239,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             else if (jsonStart == -1)
             {
                 logError($"No '{{' found in message! Message: '{message}'");
+                LastErrorTime = DateTime.Now;
                 return message;
             }
             
@@ -335,12 +347,12 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                                 name = item.Item.TypeLine;
                                             }
                                             string price = item.Listing?.Price != null ? $"{item.Listing.Price.Type} {item.Listing.Price.Amount} {item.Listing.Price.Currency}" : "No price";
-                                            int x = item.Listing.Stash?.X ?? 0; // Use Stash property
-                                            int y = item.Listing.Stash?.Y ?? 0; // Use Stash property
+                                            int x = item.Listing.Stash?.X ?? 0;
+                                            int y = item.Listing.Stash?.Y ?? 0;
                                             logMessage($"{name} - {price} at ({x}, {y})");
                                             _parent._recentItems.Enqueue((name, price, item.Listing.HideoutToken, x, y));
                                             if (_parent._recentItems.Count > MaxResponses)
-                                                _parent._recentItems.Dequeue(); // Remove oldest item if over 5
+                                                _parent._recentItems.Dequeue();
                                             if (_parent._playSound)
                                             {
                                                 logMessage("Attempting to play sound...");
@@ -386,6 +398,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                                 {
                                                     logError($"Sound playback failed: {soundEx.Message}");
                                                     logError($"Sound exception details: {soundEx}");
+                                                    LastErrorTime = DateTime.Now;
                                                 }
                                             }
                                             if (_parent.Settings.AutoTp.Value && _parent.GameController.Area.CurrentArea.IsHideout)
@@ -393,7 +406,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                                 if ((DateTime.Now - _parent._lastTpTime).TotalSeconds >= _parent.Settings.TpCooldown.Value)
                                                 {
                                                     _parent.TravelToHideout();
-                                                    _parent._recentItems.Clear(); // Clear items after successful teleport
+                                                    _parent._recentItems.Clear();
                                                     _parent._lastTpTime = DateTime.Now;
                                                     logMessage("Auto TP executed due to new search result.");
                                                 }
@@ -412,7 +425,14 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                 else
                                 {
                                     string errorMessage = await response.Content.ReadAsStringAsync();
-                                    if (response.StatusCode == System.Net.HttpStatusCode.NotFound && errorMessage.Contains("Resource not found; Item no longer available"))
+                                    LastErrorTime = DateTime.Now;
+                                    if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                                    {
+                                        logMessage("[WARNING] Trade is down (429 Too Many Requests). Retrying after rate limit cooldown...");
+                                        await Task.Delay(60000);
+                                        return;
+                                    }
+                                    else if (response.StatusCode == System.Net.HttpStatusCode.NotFound && errorMessage.Contains("Resource not found; Item no longer available"))
                                     {
                                         logMessage("[WARNING] Item unavailable: " + errorMessage);
                                     }
@@ -421,7 +441,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                         logMessage("[WARNING] Invalid query for item: " + errorMessage);
                                         if (_parent._recentItems.Count > 0)
                                         {
-                                            _parent._recentItems.Dequeue(); // Remove the invalid item
+                                            _parent._recentItems.Dequeue();
                                         }
                                     }
                                     else
@@ -436,15 +456,18 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 catch (JsonException parseEx)
                 {
                     logError($"JSON parsing failed: {parseEx.Message}");
+                    LastErrorTime = DateTime.Now;
                 }
             }
             catch (JsonException jsonEx)
             {
                 logError($"JSON parsing failed: {jsonEx.Message}");
+                LastErrorTime = DateTime.Now;
             }
             catch (Exception ex)
             {
                 logError($"Processing failed: {ex.Message}");
+                LastErrorTime = DateTime.Now;
             }
         }
 
@@ -545,18 +568,24 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             
             if (!response.IsSuccessStatusCode)
             {
+                if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                {
+                    LogMessage("[WARNING] Trade is down (429 Too Many Requests). Retrying after rate limit cooldown...");
+                    Task.Delay(60000).Wait();
+                    return;
+                }
                 LogError($"Teleport failed: {response.StatusCode}");
                 var responseContent = response.Content.ReadAsStringAsync().Result;
                 LogError($"Response content: {responseContent}");
                 if (response.StatusCode == System.Net.HttpStatusCode.BadRequest && responseContent.Contains("Invalid query"))
                 {
-                    _recentItems.Dequeue(); // Remove invalid item
+                    _recentItems.Dequeue();
                 }
             }
             else
             {
                 LogMessage("Teleport to hideout successful!");
-                _recentItems.Clear(); // Clear items after successful teleport
+                _recentItems.Clear();
                 _lastTpTime = DateTime.Now;
                 if (Settings.MoveMouseToItem.Value && GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
                 {
@@ -622,10 +651,8 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             allConfigs = allConfigs.Take(20).ToList();
         }
 
-        // Create a set of active configurations for quick lookup
         var activeConfigs = allConfigs.ToHashSet();
 
-        // Stop listeners for disabled configurations
         foreach (var listener in _listeners.ToList())
         {
             if (!activeConfigs.Contains(listener.Config))
@@ -636,13 +663,17 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             }
             else if (!listener.IsRunning)
             {
-                // Restart listener if it stopped unexpectedly but is still enabled
+                if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
+                {
+                    LogMessage($"Restart skipped for search {listener.Config.SearchId.Value}: Rate limit cooldown active.");
+                    continue;
+                }
+
                 listener.Start(LogMessage, LogError, Settings.SessionId.Value);
                 LogMessage($"Restarted listener for search: {listener.Config.SearchId.Value}");
             }
         }
 
-        // Start new listeners for newly enabled configurations
         foreach (var config in allConfigs)
         {
             var listener = _listeners.FirstOrDefault(l => l.Config == config);
@@ -662,13 +693,22 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
         ImGui.SetNextWindowPos(Settings.WindowPosition);
         ImGui.Begin("JewYourItem Results", ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize);
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.1f, 0.1f, 0.1f, 0.8f)); // Dark background
-        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.9f, 0.9f, 0.9f, 1.0f)); // Light text
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.1f, 0.1f, 0.1f, 0.8f));
+        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.9f, 0.9f, 0.9f, 1.0f));
 
         if (Settings.AutoTp.Value && (DateTime.Now - _lastTpTime).TotalSeconds < Settings.TpCooldown.Value)
         {
             float remainingCooldown = Settings.TpCooldown.Value - (float)(DateTime.Now - _lastTpTime).TotalSeconds;
             ImGui.Text($"TP Cooldown: {remainingCooldown:F1}s");
+        }
+
+        foreach (var listener in _listeners)
+        {
+            if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
+            {
+                float remainingCooldown = RestartCooldownSeconds - (float)(DateTime.Now - listener.LastErrorTime).TotalSeconds;
+                ImGui.Text($"Search {listener.Config.SearchId.Value}: Rate Limit Cooldown: {remainingCooldown:F1}s");
+            }
         }
 
         ImGui.Text($"JewYourItem: {_listeners.Count(l => l.IsRunning)} active");
@@ -685,7 +725,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             ImGui.Text("No recent items");
         }
 
-        ImGui.PopStyleColor(2); // Restore colors
+        ImGui.PopStyleColor(2);
         ImGui.End();
 
         if (Settings.ShowGui.Value)
@@ -787,7 +827,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         ImGui.SameLine();
         if (ImGui.InputInt("##TpCooldown", ref tpCooldown, 1, 10) && !_settingsUpdated)
         {
-            Settings.TpCooldown.Value = Math.Clamp(tpCooldown, 1, 30); // Enforce range 1-30
+            Settings.TpCooldown.Value = Math.Clamp(tpCooldown, 1, 30);
             _settingsUpdated = true;
             LogMessage($"TP Cooldown updated to: {Settings.TpCooldown.Value} seconds");
         }

@@ -46,19 +46,17 @@ public class JewYourItemSettings : ISettings
     [Menu("Cancel With Right Click", "Cancel operation on manual right-click")]
     [IgnoreMenu]
     public ToggleNode CancelWithRightClick { get; set; } = new ToggleNode(true);
-    
+   
     [Submenu(RenderMethod = nameof(Render))]
     public class GroupsRenderer
     {
         private readonly JewYourItemSettings _parent;
         private readonly Dictionary<string, string> _groupNameBuffers = new Dictionary<string, string>();
         private readonly Dictionary<string, string> _searchNameBuffers = new Dictionary<string, string>();
-
         public GroupsRenderer(JewYourItemSettings parent)
         {
             _parent = parent;
         }
-
         private static void HelpMarker(string desc)
         {
             if (!string.IsNullOrEmpty(desc))
@@ -74,7 +72,6 @@ public class JewYourItemSettings : ISettings
                 }
             }
         }
-
         public void Render()
         {
             var enable = _parent.Enable.Value;
@@ -98,7 +95,9 @@ public class JewYourItemSettings : ISettings
                     ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.0f, 1.0f, 0.0f, 1.0f));
                     ImGui.PushStyleColor(ImGuiCol.HeaderHovered, new Vector4(0.0f, 0.8f, 0.0f, 1.0f));
                 }
-                bool isOpen = ImGui.CollapsingHeader($"Group: {group.Name.Value}##group{i}");
+                bool isOpen = ImGui.CollapsingHeader($"Group##group{i}"); // Static ID for header
+                ImGui.SameLine();
+                ImGui.Text(group.Name.Value); // Display dynamic name
                 if (_parent.CancelWithRightClick.Value && ImGui.IsItemClicked(ImGuiMouseButton.Right))
                 {
                     ImGui.OpenPopup($"RemoveGroupContext{i}");
@@ -122,7 +121,7 @@ public class JewYourItemSettings : ISettings
                     ImGui.Indent();
                     if (ImGui.InputText($"Name##group{i}", ref groupNameBuffer, 100))
                     {
-                        group.Name.Value = groupNameBuffer;
+                        group.Name.Value = groupNameBuffer; // Update dynamically as they type
                     }
                     var enableGroup = group.Enable.Value;
                     ImGui.Checkbox($"Enable##group{i}", ref enableGroup);
@@ -190,7 +189,9 @@ public class JewYourItemSettings : ISettings
                             ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.0f, 1.0f, 0.0f, 1.0f));
                             ImGui.PushStyleColor(ImGuiCol.HeaderHovered, new Vector4(0.0f, 0.8f, 0.0f, 1.0f));
                         }
-                        bool sOpen = ImGui.CollapsingHeader($"Search: {searchNameBuffer}##search{i}{j}");
+                        bool sOpen = ImGui.CollapsingHeader($"Search##search{i}{j}"); // Static ID for header
+                        ImGui.SameLine();
+                        ImGui.Text(search.Name.Value); // Display dynamic name
                         if (_parent.CancelWithRightClick.Value && ImGui.IsItemClicked(ImGuiMouseButton.Right))
                         {
                             tempSearches.RemoveAt(j);
@@ -210,7 +211,7 @@ public class JewYourItemSettings : ISettings
                             HelpMarker("Enable or disable this search; right-click header to delete search");
                             if (ImGui.InputText($"Name##search{i}{j}", ref searchNameBuffer, 100))
                             {
-                                search.Name.Value = searchNameBuffer;
+                                search.Name.Value = searchNameBuffer; // Update dynamically as they type
                             }
                             var league = search.League.Value;
                             ImGui.InputText($"League##search{i}{j}", ref league, 100);
