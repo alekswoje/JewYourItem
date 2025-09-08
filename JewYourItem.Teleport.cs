@@ -181,7 +181,7 @@ public partial class JewYourItem
         LogDebug($"Hideout token: {currentItem.HideoutToken}");
         var request = new HttpRequestMessage(HttpMethod.Post, "https://www.pathofexile.com/api/trade2/whisper")
         {
-            Content = new StringContent($"{{ \"token\": \"{currentItem.HideoutToken}\" }}", Encoding.UTF8, "application/json")
+            Content = new StringContent($"{{ \"token\": \"{currentItem.HideoutToken}\", \"continue\": true }}", Encoding.UTF8, "application/json")
         };
         request.Headers.Add("Cookie", $"POESESSID={Settings.SessionId.Value}");
         request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
