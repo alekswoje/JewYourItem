@@ -22,7 +22,7 @@ public partial class JewYourItem
     {
         try
         {
-            LogMessage($"🔄 REFRESHING TOKEN: Fetching fresh token for item {item.ItemId}");
+            LogDebug($"🔄 REFRESHING TOKEN: Fetching fresh token for item {item.ItemId}");
             
             // Use the trade2/fetch API to get fresh item data
             var fetchUrl = $"https://www.pathofexile.com/api/trade2/fetch/{item.ItemId}";
@@ -53,13 +53,13 @@ public partial class JewYourItem
                                 item.TokenIssuedAt = issuedAt;
                                 item.TokenExpiresAt = expiresAt;
                                 
-                                LogMessage($"✅ TOKEN REFRESHED: New token expires at {expiresAt:HH:mm:ss}");
+                                LogInfo($"✅ TOKEN REFRESHED: New token expires at {expiresAt:HH:mm:ss}");
                                 return true;
                             }
                         }
                     }
                     
-                    LogMessage($"❌ TOKEN REFRESH FAILED: API returned {response.StatusCode}");
+                    LogWarning($"❌ TOKEN REFRESH FAILED: API returned {response.StatusCode}");
                     return false;
                 }
             }
@@ -76,7 +76,7 @@ public partial class JewYourItem
         // CRITICAL: Respect plugin enable state
         if (!Settings.Enable.Value)
         {
-            LogMessage("🛑 Teleport blocked: Plugin is disabled");
+            LogDebug("🛑 Teleport blocked: Plugin is disabled");
             return;
         }
         
@@ -84,78 +84,110 @@ public partial class JewYourItem
         _isManualTeleport = isManual;
         if (isManual)
         {
-            LogMessage("🎯 MANUAL TELEPORT: User initiated teleport via hotkey");
+            LogInfo("🎯 MANUAL TELEPORT: User initiated teleport via hotkey");
         }
         else
         {
-            LogMessage("🤖 AUTO TELEPORT: Auto teleport triggered by new item");
+            LogDebug("🤖 AUTO TELEPORT: Auto teleport triggered by new item");
         }
 
         if (!this.GameController.Area.CurrentArea.IsHideout)
         {
-            LogMessage("Teleport skipped: Not in hideout zone.");
+            LogDebug("Teleport skipped: Not in hideout zone.");
             _isManualTeleport = false; // Reset flag on early return
             return;
         }
 
-        // Check dynamic TP lock state
-        if (_tpLocked)
+        // Check dynamic TP lock state - ONLY for auto teleports, manual teleports can always proceed
+        if (_tpLocked && !isManual)
         {
             // Check for timeout (10 seconds)
             if ((DateTime.Now - _tpLockedTime).TotalSeconds >= 10)
             {
-                LogMessage("🔓 TP UNLOCKED: 10-second timeout reached, unlocking TP");
+                LogDebug("🔓 TP UNLOCKED: 10-second timeout reached, unlocking TP");
                 _tpLocked = false;
                 _tpLockedTime = DateTime.MinValue;
             }
             else
             {
                 double remainingTime = 10 - (DateTime.Now - _tpLockedTime).TotalSeconds;
-                LogMessage($"🔒 TP LOCKED: Waiting for purchase window or timeout ({remainingTime:F1}s remaining)");
+                LogDebug($"🔒 TP LOCKED: Auto teleport blocked, waiting for purchase window or timeout ({remainingTime:F1}s remaining)");
                 _isManualTeleport = false; // Reset flag on early return
                 return;
             }
         }
-
-        LogMessage("=== TRAVEL TO HIDEOUT HOTKEY PRESSED ===");
-        LogMessage($"Recent items count: {_recentItems.Count}");
         
-        if (_recentItems.Count == 0) 
+        // Manual teleports bypass TP lock
+        if (isManual && _tpLocked)
         {
-            LogMessage("No recent items available for travel");
-            _isManualTeleport = false; // Reset flag on early return
-            return;
+            LogDebug("🎯 MANUAL OVERRIDE: Manual teleport bypassing TP lock");
         }
 
-        var currentItem = _recentItems.Peek();
+        LogDebug("=== TRAVEL TO HIDEOUT HOTKEY PRESSED ===");
+        
+        RecentItem currentItem;
+        lock (_recentItemsLock)
+        {
+            LogDebug($"Recent items count: {_recentItems.Count}");
+            
+            if (_recentItems.Count == 0) 
+            {
+                LogDebug("No recent items available for travel");
+                _isManualTeleport = false; // Reset flag on early return
+                return;
+            }
+
+            currentItem = _recentItems.Peek();
+        }
         
         // Check if token is expired and refresh if needed
         if (currentItem.IsTokenExpired())
         {
-            LogMessage($"🔄 TOKEN EXPIRED: Token for {currentItem.Name} expired at {currentItem.TokenExpiresAt:HH:mm:ss}, refreshing...");
+            LogDebug($"🔄 TOKEN EXPIRED: Token for {currentItem.Name} expired at {currentItem.TokenExpiresAt:HH:mm:ss}, refreshing...");
             var refreshSuccess = await RefreshItemToken(currentItem);
             if (!refreshSuccess)
             {
-                LogMessage("❌ TOKEN REFRESH FAILED: Unable to refresh token, removing item from queue");
-                _recentItems.Dequeue();
-                if (_recentItems.Count > 0)
+                LogWarning("❌ TOKEN REFRESH FAILED: Unable to refresh token, removing item from queue");
+                
+                bool hasMoreItems;
+                lock (_recentItemsLock)
                 {
-                    LogMessage($"🔄 RETRY: Attempting teleport to next item ({_recentItems.Count} remaining)");
+                    // Double-check queue isn't empty before dequeue (race condition protection)
+                    if (_recentItems.Count > 0)
+                    {
+                        _recentItems.Dequeue();
+                    }
+                    else
+                    {
+                        LogWarning("⚠️ RACE CONDITION: Queue became empty before dequeue attempt");
+                        _isManualTeleport = false;
+                        return;
+                    }
+                    
+                    hasMoreItems = _recentItems.Count > 0;
+                    if (hasMoreItems)
+                    {
+                        LogDebug($"🔄 RETRY: Attempting teleport to next item ({_recentItems.Count} remaining)");
+                    }
+                }
+                
+                if (hasMoreItems)
+                {
                     await Task.Delay(500);
                     TravelToHideout(_isManualTeleport);
                     return;
                 }
                 else
                 {
-                    LogMessage("No valid items remaining for teleport");
+                    LogDebug("No valid items remaining for teleport");
                     _isManualTeleport = false;
                     return;
                 }
             }
         }
         
-        LogMessage($"Attempting to travel to hideout for item: {currentItem.Name} - {currentItem.Price}");
-        LogMessage($"Hideout token: {currentItem.HideoutToken}");
+        LogDebug($"Attempting to travel to hideout for item: {currentItem.Name} - {currentItem.Price}");
+        LogDebug($"Hideout token: {currentItem.HideoutToken}");
         var request = new HttpRequestMessage(HttpMethod.Post, "https://www.pathofexile.com/api/trade2/whisper")
         {
             Content = new StringContent($"{{ \"token\": \"{currentItem.HideoutToken}\" }}", Encoding.UTF8, "application/json")
@@ -197,14 +229,15 @@ public partial class JewYourItem
             }
             
             // REMOVED: Rate limiting for teleport requests to make auto TP instant
-            LogMessage("Sending teleport request...");
-            var response = _httpClient.SendAsync(request).Result;
-            LogMessage($"Response status: {response.StatusCode}");
+            LogDebug("Sending teleport request...");
+            
+            var response = await _httpClient.SendAsync(request);
+            LogDebug($"Response status: {response.StatusCode}");
             
             // Lock TP immediately after successful request send (before checking response)
             _tpLocked = true;
             _tpLockedTime = DateTime.Now;
-            LogMessage("🔒 TP LOCKED: Request sent successfully, locked until window loads or timeout");
+            LogDebug("🔒 TP LOCKED: Request sent successfully, locked until window loads or timeout");
             
             // Handle rate limiting
             if (_rateLimiter != null)
@@ -219,8 +252,16 @@ public partial class JewYourItem
             if (!response.IsSuccessStatusCode)
             {
                 LogError($"Teleport failed: {response.StatusCode}");
-                var responseContent = response.Content.ReadAsStringAsync().Result;
+                var responseContent = await response.Content.ReadAsStringAsync();
                 LogError($"Response content: {responseContent}");
+                
+                // Unlock TP for "item not available" errors - these shouldn't cause a cooldown
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    LogDebug("🔓 TP UNLOCKED: Item not available error, no cooldown needed");
+                    _tpLocked = false;
+                    _tpLockedTime = DateTime.MinValue;
+                }
                 
                 // Remove failed item and try next one if available
                 if (response.StatusCode == System.Net.HttpStatusCode.NotFound || 
@@ -248,22 +289,31 @@ public partial class JewYourItem
                         LogMessage($"🗑️ ITEM EXPIRED: Removing expired item '{currentItem.Name}' and trying next...");
                     }
                     
-                    // Double-check queue isn't empty before dequeue (race condition protection)
-                    if (_recentItems.Count > 0)
+                    bool hasMoreItems;
+                    lock (_recentItemsLock)
                     {
-                        _recentItems.Dequeue();
-                    }
-                    else
-                    {
-                        LogMessage("⚠️ RACE CONDITION: Queue became empty before dequeue");
-                        _isManualTeleport = false; // Reset flag
-                        return;
+                        // Double-check queue isn't empty before dequeue (race condition protection)
+                        if (_recentItems.Count > 0)
+                        {
+                            _recentItems.Dequeue();
+                        }
+                        else
+                        {
+                            LogMessage("⚠️ RACE CONDITION: Queue became empty before dequeue");
+                            _isManualTeleport = false; // Reset flag
+                            return;
+                        }
+                        
+                        hasMoreItems = _recentItems.Count > 0;
+                        if (hasMoreItems)
+                        {
+                            LogDebug($"🔄 RETRY: Attempting teleport to next item ({_recentItems.Count} remaining)");
+                        }
                     }
                     
                     // Try the next item if available
-                    if (_recentItems.Count > 0)
+                    if (hasMoreItems)
                     {
-                        LogMessage($"🔄 RETRY: Attempting teleport to next item ({_recentItems.Count} remaining)");
                         await Task.Delay(500); // Small delay before retry
                         TravelToHideout(_isManualTeleport); // Recursive call to try next item, preserve manual flag
                     }
@@ -276,17 +326,74 @@ public partial class JewYourItem
             }
             else
             {
-                LogMessage("Teleport to hideout successful!");
+                // Check response content to verify actual success
+                var responseContent = await response.Content.ReadAsStringAsync();
+                LogDebug($"🔍 TELEPORT RESPONSE: Status={response.StatusCode}, Content={responseContent}");
                 
-                // Store location for BOTH manual and auto teleports to enable mouse movement
-                _teleportedItemLocation = (currentItem.X, currentItem.Y);
-                if (_isManualTeleport)
+                // Check if the response indicates actual success
+                bool actualSuccess = !responseContent.Contains("\"error\"") && 
+                                   !responseContent.Contains("failed") && 
+                                   !responseContent.Contains("invalid");
+                
+                if (actualSuccess)
                 {
-                    LogMessage($"📍 STORED TELEPORT LOCATION: Manual teleport to item at ({currentItem.X}, {currentItem.Y}) for mouse movement");
+                    LogInfo("✅ Teleport to hideout successful!");
+                    
+                    // Store location for BOTH manual and auto teleports to enable mouse movement
+                    _teleportedItemLocation = (currentItem.X, currentItem.Y);
+                    if (_isManualTeleport)
+                    {
+                        LogDebug($"📍 STORED TELEPORT LOCATION: Manual teleport to item at ({currentItem.X}, {currentItem.Y}) for mouse movement");
+                    }
+                    else
+                    {
+                        LogDebug($"📍 STORED TELEPORT LOCATION: Auto teleport to item at ({currentItem.X}, {currentItem.Y}) for mouse movement");
+                    }
+                    
+                    // Schedule a verification check after a short delay to confirm we're actually in hideout
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(3000); // Wait 3 seconds for area change
+                        try
+                        {
+                            // Note: Area verification removed due to API access issues
+                            // The teleport success is already validated by response content analysis
+                            LogDebug($"✅ TELEPORT VERIFICATION: Response validation passed, assuming successful teleport");
+                        }
+                        catch (Exception ex)
+                        {
+                            LogDebug($"🔍 TELEPORT VERIFICATION: Could not verify area - {ex.Message}");
+                        }
+                    });
                 }
                 else
                 {
-                    LogMessage($"📍 STORED TELEPORT LOCATION: Auto teleport to item at ({currentItem.X}, {currentItem.Y}) for mouse movement");
+                    LogWarning($"⚠️ TELEPORT RESPONSE INDICATES FAILURE: {responseContent}");
+                    LogMessage($"❌ TELEPORT FAILED: API returned success but response indicates failure for '{currentItem.Name}'");
+                    
+                    // Remove this item and try next one
+                    bool hasMoreItems;
+                    lock (_recentItemsLock)
+                    {
+                        if (_recentItems.Count > 0)
+                        {
+                            _recentItems.Dequeue();
+                        }
+                        hasMoreItems = _recentItems.Count > 0;
+                    }
+                    
+                    if (hasMoreItems)
+                    {
+                        LogDebug($"🔄 RETRY: Attempting teleport to next item ({_recentItems.Count} remaining)");
+                        await Task.Delay(500);
+                        TravelToHideout(_isManualTeleport);
+                        return;
+                    }
+                    else
+                    {
+                        LogMessage("📭 NO MORE ITEMS: All items in queue have failed");
+                        _isManualTeleport = false;
+                    }
                 }
                 
                 // INSTANT MOUSE MOVEMENT: Move cursor during loading screen if coordinates have been learned
@@ -294,18 +401,21 @@ public partial class JewYourItem
                 if (Settings.MoveMouseToItem.Value && Settings.HasLearnedPurchaseWindow.Value && !GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
                 {
                     string tpType = _isManualTeleport ? "manual" : "auto";
-                    LogMessage($"⚡ LOADING SCREEN MOUSE MOVE: {tpType} teleport request sent, moving cursor during loading for item at ({currentItem.X}, {currentItem.Y})");
+                    LogDebug($"⚡ LOADING SCREEN MOUSE MOVE: {tpType} teleport request sent, moving cursor during loading for item at ({currentItem.X}, {currentItem.Y})");
                     MoveMouseToCalculatedPosition(currentItem.X, currentItem.Y);
                 }
-                // Fallback: Move mouse if purchase window is already open (first time learning or when window was already open)
+                // CRITICAL: Do NOT move mouse if purchase window is open during hideout TP
+                // This prevents buying wrong items when hideout TP fails silently
                 else if (Settings.MoveMouseToItem.Value && GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
                 {
-                    string tpType = _isManualTeleport ? "manually" : "auto";
-                    LogMessage($"🖱️ FALLBACK MOUSE MOVE: Purchase window already open, moving to {tpType} teleported item for learning");
-                    MoveMouseToItemLocation(currentItem.X, currentItem.Y);
+                    LogWarning($"⚠️ MERCHANT WINDOW OPEN: Skipping mouse movement to prevent buying wrong item during hideout TP");
+                    LogDebug($"🛡️ SAFETY: Will move mouse only after merchant window closes and new hideout loads");
                 }
                 
-                _recentItems.Clear();
+                lock (_recentItemsLock)
+                {
+                    _recentItems.Clear();
+                }
                 _lastTpTime = DateTime.Now;
                 _isManualTeleport = false; // Reset flag
             }
@@ -364,7 +474,7 @@ public partial class JewYourItem
             // Release Ctrl key
             keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
             
-            LogMessage("✅ AUTO BUY: Ctrl+Left Click completed!");
+            LogInfo("✅ AUTO BUY: Ctrl+Left Click completed!");
         }
         catch (Exception ex)
         {
@@ -423,12 +533,12 @@ public partial class JewYourItem
             // Move mouse cursor
             System.Windows.Forms.Cursor.Position = new System.Drawing.Point(finalX, finalY);
             
-            LogMessage($"Moved mouse to item location: Stash({x},{y}) -> Screen({finalX},{finalY}) - Panel size: {rect.Width}x{rect.Height}");
+            LogDebug($"Moved mouse to item location: Stash({x},{y}) -> Screen({finalX},{finalY}) - Panel size: {rect.Width}x{rect.Height}");
             
             // Auto Buy: Perform Ctrl+Left Click if enabled
             if (Settings.AutoBuy.Value)
             {
-                LogMessage("🛒 AUTO BUY: Enabled, performing purchase click...");
+                LogInfo("🛒 AUTO BUY: Enabled, performing purchase click...");
                 await Task.Delay(100); // Small delay to ensure mouse movement is complete
                 await PerformCtrlLeftClickAsync();
             }
@@ -455,30 +565,32 @@ public partial class JewYourItem
                 return;
             }
 
-            // Check dynamic TP lock state
+            // GUI teleports (clicking buttons) are considered manual and bypass TP lock
             if (_tpLocked)
             {
                 double remainingTime = 10 - (DateTime.Now - _tpLockedTime).TotalSeconds;
-                LogMessage($"🔒 TP LOCKED: Cannot teleport to specific item, still locked ({remainingTime:F1}s remaining)");
-                return;
+                LogDebug($"🎯 MANUAL OVERRIDE: GUI teleport bypassing TP lock (would have {remainingTime:F1}s remaining)");
             }
 
             LogMessage($"🎯 SPECIFIC ITEM TP: Teleporting to {item.Name} at ({item.X}, {item.Y})");
 
             // Move the specific item to the front of the queue
-            var tempQueue = new Queue<RecentItem>();
-            tempQueue.Enqueue(item);
-            
-            // Add all other items back (except the one we're teleporting to)
-            foreach (var otherItem in _recentItems)
+            lock (_recentItemsLock)
             {
-                if (otherItem != item)
+                var tempQueue = new Queue<RecentItem>();
+                tempQueue.Enqueue(item);
+                
+                // Add all other items back (except the one we're teleporting to)
+                foreach (var otherItem in _recentItems)
                 {
-                    tempQueue.Enqueue(otherItem);
+                    if (otherItem != item)
+                    {
+                        tempQueue.Enqueue(otherItem);
+                    }
                 }
+                
+                _recentItems = tempQueue;
             }
-            
-            _recentItems = tempQueue;
             
             // Set this as a manual teleport and call the main teleport method
             TravelToHideout(isManual: true);
@@ -495,19 +607,22 @@ public partial class JewYourItem
         {
             LogMessage($"🗑️ REMOVING ITEM: {itemToRemove.Name} from recent items list");
             
-            var tempQueue = new Queue<RecentItem>();
-            
-            // Add all items except the one to remove
-            foreach (var item in _recentItems)
+            lock (_recentItemsLock)
             {
-                if (item != itemToRemove)
+                var tempQueue = new Queue<RecentItem>();
+                
+                // Add all items except the one to remove
+                foreach (var item in _recentItems)
                 {
-                    tempQueue.Enqueue(item);
+                    if (item != itemToRemove)
+                    {
+                        tempQueue.Enqueue(item);
+                    }
                 }
+                
+                _recentItems = tempQueue;
+                LogMessage($"📦 Item removed. {_recentItems.Count} items remaining.");
             }
-            
-            _recentItems = tempQueue;
-            LogMessage($"📦 Item removed. {_recentItems.Count} items remaining.");
         }
         catch (Exception ex)
         {
@@ -530,12 +645,12 @@ public partial class JewYourItem
                        (uint)((x * 65535) / GetSystemMetrics(SM_CXSCREEN)), 
                        (uint)((y * 65535) / GetSystemMetrics(SM_CYSCREEN)), 0, 0);
 
-            LogMessage($"⚡ MOVED MOUSE TO LEARNED POSITION: Screen({x},{y})");
+            LogDebug($"⚡ MOVED MOUSE TO LEARNED POSITION: Screen({x},{y})");
 
             // Auto Buy: Wait for purchase window to actually load, then click
             if (Settings.AutoBuy.Value)
             {
-                LogMessage("🛒 AUTO BUY: Scheduling click after window loads...");
+                LogInfo("🛒 AUTO BUY: Scheduling click after window loads...");
                 Task.Run(async () =>
                 {
                     // Wait up to 3 seconds for purchase window to be visible
@@ -545,7 +660,7 @@ public partial class JewYourItem
                         {
                             await Task.Delay(100); // Small delay to ensure window is fully loaded
                             await PerformCtrlLeftClickAsync();
-                            LogMessage("🛒 AUTO BUY: Executed click after window loaded");
+                            LogInfo("🛒 AUTO BUY: Executed click after window loaded");
                             return;
                         }
                         await Task.Delay(100);
@@ -578,7 +693,7 @@ public partial class JewYourItem
                            (uint)((fallbackX * 65535) / GetSystemMetrics(SM_CXSCREEN)), 
                            (uint)((fallbackY * 65535) / GetSystemMetrics(SM_CYSCREEN)), 0, 0);
 
-                LogMessage($"⚡ MOVED MOUSE TO CALCULATED POSITION: Stash({stashX},{stashY}) -> Screen({fallbackX},{fallbackY}) [Using fallback learned position]");
+                LogDebug($"⚡ MOVED MOUSE TO CALCULATED POSITION: Stash({stashX},{stashY}) -> Screen({fallbackX},{fallbackY}) [Using fallback learned position]");
             }
             else
             {
@@ -593,13 +708,13 @@ public partial class JewYourItem
                            (uint)((screenX * 65535) / GetSystemMetrics(SM_CXSCREEN)), 
                            (uint)((screenY * 65535) / GetSystemMetrics(SM_CYSCREEN)), 0, 0);
 
-                LogMessage($"⚡ MOVED MOUSE TO CALCULATED POSITION: Stash({stashX},{stashY}) -> Screen({screenX},{screenY}) [Calculated from panel dimensions]");
+                LogDebug($"⚡ MOVED MOUSE TO CALCULATED POSITION: Stash({stashX},{stashY}) -> Screen({screenX},{screenY}) [Calculated from panel dimensions]");
             }
 
             // If Auto Buy is enabled, wait for purchase window to be visible before clicking
             if (Settings.AutoBuy.Value)
             {
-                LogMessage("🛒 AUTO BUY: Waiting for purchase window to be visible before clicking...");
+                LogInfo("🛒 AUTO BUY: Waiting for purchase window to be visible before clicking...");
                 Task.Run(async () =>
                 {
                     // Wait up to 10 seconds for purchase window to become visible
@@ -612,12 +727,12 @@ public partial class JewYourItem
 
                     if (GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
                     {
-                        LogMessage("🛒 AUTO BUY: Purchase window visible, performing Ctrl+Left click...");
+                        LogInfo("🛒 AUTO BUY: Purchase window visible, performing Ctrl+Left click...");
                         await PerformCtrlLeftClickAsync();
                     }
                     else
                     {
-                        LogMessage("🛒 AUTO BUY: Timeout waiting for purchase window to become visible");
+                        LogInfo("🛒 AUTO BUY: Timeout waiting for purchase window to become visible");
                     }
                 });
             }

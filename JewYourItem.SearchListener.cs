@@ -27,22 +27,34 @@ public partial class JewYourItem
         public DateTime LastConnectionAttempt { get; set; } = DateTime.MinValue;
         public DateTime LastErrorTime { get; set; } = DateTime.MinValue;
         public int ConnectionAttempts { get; set; } = 0;
+        public bool IsAuthenticationError { get; set; } = false;
+        public string LastErrorMessage { get; set; } = "";
         private readonly object _connectionLock = new object();
         private StringBuilder _messageBuffer = new StringBuilder();
-        private readonly Action<string> _logMessage;
-        private readonly Action<string> _logError;
+        private Action<string> _logMessage;
+        private Action<string> _logError;
+        private readonly Action<string> _logDebug;
+        private readonly Action<string> _logInfo;
+        private readonly Action<string> _logWarning;
 
-        public SearchListener(JewYourItem parent, JewYourItemInstanceSettings config, Action<string> logMessage, Action<string> logError)
+        public SearchListener(JewYourItem parent, JewYourItemInstanceSettings config, Action<string> logMessage, Action<string> logError, Action<string> logDebug, Action<string> logInfo, Action<string> logWarning)
         {
             _parent = parent;
             Config = config;
             Cts = new CancellationTokenSource();
             _logMessage = logMessage;
             _logError = logError;
+            _logDebug = logDebug;
+            _logInfo = logInfo;
+            _logWarning = logWarning;
         }
 
         public async void Start(Action<string> logMessage, Action<string> logError, string sessionId)
         {
+            // Update logging delegates in case they changed
+            _logMessage = logMessage;
+            _logError = logError;
+            // Note: LogDebug, LogInfo, LogWarning are set in constructor and shouldn't change
             lock (_connectionLock)
             {
                 // STRICT CONNECTION SAFETY CHECKS
@@ -67,31 +79,39 @@ public partial class JewYourItem
                     return;
                 }
 
-                // Rate limit cooldown check
-                if ((DateTime.Now - LastErrorTime).TotalSeconds < JewYourItem.RestartCooldownSeconds)
+                // Rate limit cooldown check - use shorter cooldown for auth errors
+                double cooldownSeconds = IsAuthenticationError ? 10 : JewYourItem.RestartCooldownSeconds; // 10 seconds for auth errors, 300 for others
+                if ((DateTime.Now - LastErrorTime).TotalSeconds < cooldownSeconds)
                 {
-                    _logMessage($"🛡️ CONNECTION BLOCKED: Search {Config.SearchId.Value} in rate limit cooldown ({JewYourItem.RestartCooldownSeconds - (DateTime.Now - LastErrorTime).TotalSeconds:F1}s remaining)");
+                    if (IsAuthenticationError)
+                    {
+                        _logDebug($"🔐 AUTH ERROR COOLDOWN: Search {Config.SearchId.Value} waiting for session ID fix ({cooldownSeconds - (DateTime.Now - LastErrorTime).TotalSeconds:F1}s remaining)");
+                    }
+                    else
+                    {
+                        _logDebug($"🛡️ CONNECTION BLOCKED: Search {Config.SearchId.Value} in rate limit cooldown ({cooldownSeconds - (DateTime.Now - LastErrorTime).TotalSeconds:F1}s remaining)");
+                    }
                     return;
                 }
 
                 // EMERGENCY: Connection attempt throttling (max 1 attempt per 30 seconds)
                 if ((DateTime.Now - LastConnectionAttempt).TotalSeconds < 30)
                 {
-                    _logMessage($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} connection throttled ({30 - (DateTime.Now - LastConnectionAttempt).TotalSeconds:F1}s remaining)");
+                    _logDebug($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} connection throttled ({30 - (DateTime.Now - LastConnectionAttempt).TotalSeconds:F1}s remaining)");
                     return;
                 }
 
                 // EMERGENCY: Max connection attempts per hour (extremely limited)
                 if (ConnectionAttempts >= 3 && (DateTime.Now - LastConnectionAttempt).TotalHours < 1)
                 {
-                    _logMessage($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} exceeded max connection attempts (3 per HOUR)");
+                    _logDebug($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} exceeded max connection attempts (3 per HOUR)");
                     return;
                 }
 
                 // EMERGENCY: Global session connection limit
                 if (ConnectionAttempts >= 10)
                 {
-                    _logMessage($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} exceeded TOTAL session limit (10 attempts EVER)");
+                    _logDebug($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} exceeded TOTAL session limit (10 attempts EVER)");
                     return;
                 }
 
@@ -101,11 +121,28 @@ public partial class JewYourItem
                     ConnectionAttempts = Math.Min(ConnectionAttempts, 5); // Partial reset, keep some penalty
                 }
 
-                // EMERGENCY: Check global limits
+                // EMERGENCY: Check global limits (allow more attempts during startup)
                 JewYourItem._globalConnectionAttempts++;
-                if (JewYourItem._globalConnectionAttempts > 3)
+                
+                // Calculate time since plugin start to allow generous startup period
+                var timeSinceStart = DateTime.Now - JewYourItem._pluginStartTime;
+                bool isInitialStartup = timeSinceStart.TotalMinutes < 2; // 2 minute startup grace period
+                bool isFirstConnectionAttempt = ConnectionAttempts <= 1;
+                
+                // During startup: Allow up to 25 total attempts (for 20+ listeners + some retries)
+                // After startup: Allow only 3 attempts (for retry protection)
+                int globalLimit = isInitialStartup ? 25 : 3;
+                
+                if (JewYourItem._globalConnectionAttempts > globalLimit)
                 {
-                    _logMessage($"🚨🚨🚨 GLOBAL EMERGENCY SHUTDOWN: Too many connection attempts ({JewYourItem._globalConnectionAttempts})");
+                    if (isInitialStartup)
+                    {
+                        _logMessage($"🚨🚨🚨 STARTUP EMERGENCY SHUTDOWN: Too many startup attempts ({JewYourItem._globalConnectionAttempts}/{globalLimit})");
+                    }
+                    else
+                    {
+                        _logMessage($"🚨🚨🚨 GLOBAL EMERGENCY SHUTDOWN: Too many retry attempts ({JewYourItem._globalConnectionAttempts}/{globalLimit})");
+                    }
                     JewYourItem._emergencyShutdown = true;
                     return;
                 }
@@ -115,7 +152,7 @@ public partial class JewYourItem
                 LastConnectionAttempt = DateTime.Now;
                 ConnectionAttempts++;
                 
-                _logMessage($"🔌 STARTING CONNECTION: Search {Config.SearchId.Value} (Attempt #{ConnectionAttempts}, Global: {JewYourItem._globalConnectionAttempts})");
+                _logDebug($"🔌 STARTING CONNECTION: Search {Config.SearchId.Value} (Attempt #{ConnectionAttempts}, Global: {JewYourItem._globalConnectionAttempts})");
             }
             try
             {
@@ -154,6 +191,10 @@ public partial class JewYourItem
                     IsRunning = true;
                 }
                 
+                // Clear any previous authentication errors on successful connection
+                IsAuthenticationError = false;
+                LastErrorMessage = "";
+                
                 _logMessage($"✅ CONNECTED: WebSocket for search {Config.SearchId.Value}");
                 _parent._activeListener = this;
                 _ = ReceiveMessagesAsync(_logMessage, _logError, sessionId);
@@ -166,7 +207,24 @@ public partial class JewYourItem
                     IsRunning = false;
                 }
                 
-                _logError($"❌ CONNECTION FAILED: Search {Config.SearchId.Value}: {ex.Message}");
+                // Check for authentication errors (401)
+                bool isAuthError = ex.Message.Contains("401");
+                IsAuthenticationError = isAuthError;
+                LastErrorMessage = ex.Message;
+                
+                // Debug logging to help troubleshoot
+                _logDebug($"🔍 ERROR ANALYSIS: Message='{ex.Message}', IsAuthError={isAuthError}");
+                
+                if (isAuthError)
+                {
+                    _logError($"🔐 AUTHENTICATION FAILED: Search {Config.SearchId.Value} - Invalid session ID! Please update your POESESSID in settings.");
+                    _logError($"💡 TIP: Get your session ID from browser cookies on pathofexile.com");
+                }
+                else
+                {
+                    _logError($"❌ CONNECTION FAILED: Search {Config.SearchId.Value}: {ex.Message}");
+                }
+                
                 LastErrorTime = DateTime.Now;
                 
                 // Clean up WebSocket on failure
@@ -421,9 +479,12 @@ public partial class JewYourItem
                                                     TokenExpiresAt = expiresAt
                                                 };
                                                 
-                                                _parent._recentItems.Enqueue(recentItem);
-                                                while (_parent._recentItems.Count > _parent.Settings.MaxRecentItems.Value)
-                                                    _parent._recentItems.Dequeue();
+                                                lock (_parent._recentItemsLock)
+                                                {
+                                                    _parent._recentItems.Enqueue(recentItem);
+                                                    while (_parent._recentItems.Count > _parent.Settings.MaxRecentItems.Value)
+                                                        _parent._recentItems.Dequeue();
+                                                }
                                                 if (_parent._playSound)
                                                 {
                                                     logMessage("Attempting to play sound...");
@@ -502,7 +563,10 @@ public partial class JewYourItem
                                                     if (!_parent._tpLocked)
                                                     {
                                                         _parent.TravelToHideout();
-                                                        _parent._recentItems.Clear();
+                                                        lock (_parent._recentItemsLock)
+                                                        {
+                                                            _parent._recentItems.Clear();
+                                                        }
                                                         _parent._lastTpTime = DateTime.Now;
                                                         logMessage("Auto TP executed due to new search result.");
                                                     }
@@ -532,9 +596,12 @@ public partial class JewYourItem
                                         else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest && errorMessage.Contains("Invalid query"))
                                         {
                                             logMessage($"⚠️ BATCH WARNING: Invalid query for batch: {errorMessage}");
-                                            if (_parent._recentItems.Count > 0)
+                                            lock (_parent._recentItemsLock)
                                             {
-                                                _parent._recentItems.Dequeue();
+                                                if (_parent._recentItems.Count > 0)
+                                                {
+                                                    _parent._recentItems.Dequeue();
+                                                }
                                             }
                                         }
                                         else
@@ -575,6 +642,10 @@ public partial class JewYourItem
                 IsRunning = false;
                 IsConnecting = false;
                 
+                // Clear logging delegates to prevent any delayed callbacks
+                _logMessage = (msg) => { }; // No-op logger
+                _logError = (msg) => { }; // No-op logger
+                
                 if (Cts != null && !Cts.IsCancellationRequested)
                 {
                     try
@@ -598,7 +669,9 @@ public partial class JewYourItem
                             {
                                 try
                                 {
-                                    await webSocketToClose.CloseAsync(WebSocketCloseStatus.NormalClosure, "Plugin stopped", CancellationToken.None);
+                                    // Use a timeout for closing the WebSocket
+                                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                                    await webSocketToClose.CloseAsync(WebSocketCloseStatus.NormalClosure, "Plugin stopped", cts.Token);
                                 }
                                 catch (Exception ex)
                                 {
@@ -615,6 +688,19 @@ public partial class JewYourItem
                                         _logError($"Error disposing WebSocket for {Config.SearchId.Value}: {ex.Message}");
                                     }
                                 }
+                            });
+                            
+                            // Fallback: Force dispose after 3 seconds if still not closed
+                            Task.Delay(3000).ContinueWith(_ =>
+                            {
+                                try
+                                {
+                                    if (webSocketToClose.State != WebSocketState.Closed)
+                                    {
+                                        webSocketToClose.Dispose();
+                                    }
+                                }
+                                catch { /* Ignore disposal errors in fallback */ }
                             });
                         }
                         else

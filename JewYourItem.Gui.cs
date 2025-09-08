@@ -14,7 +14,18 @@ public partial class JewYourItem
     public override void Render()
     {
         // CRITICAL: Respect plugin enable state for ALL rendering
-        if (!Settings.Enable.Value || !Settings.ShowGui.Value) return;
+        if (!Settings.Enable.Value)
+        {
+            // If plugin is disabled, ensure all listeners are stopped
+            if (_listeners.Count > 0)
+            {
+                LogMessage("🛑 PLUGIN DISABLED: Force stopping all listeners from Render method");
+                ForceStopAll();
+            }
+            return;
+        }
+        
+        if (!Settings.ShowGui.Value) return;
 
         // Set window position but allow auto-resizing
         ImGui.SetNextWindowPos(Settings.WindowPosition, ImGuiCond.FirstUseEver);
@@ -60,20 +71,41 @@ public partial class JewYourItem
                 string status = "Unknown";
                 if (listener.IsConnecting) status = "🔄 Connecting";
                 else if (listener.IsRunning) status = "✅ Connected";
+                else if (listener.IsAuthenticationError) status = "🔐 Authentication Error";
                 else status = "❌ Disconnected";
                 
-                ImGui.BulletText($"{listener.Config.SearchId.Value}: {status}");
+                // Use red text for authentication errors
+                if (listener.IsAuthenticationError)
+                {
+                    ImGui.PushStyleColor(ImGuiCol.Text, 0xFF0000FF); // Red color (ABGR format)
+                    ImGui.BulletText($"{listener.Config.SearchId.Value}: {status}");
+                    ImGui.PopStyleColor();
+                }
+                else
+                {
+                    ImGui.BulletText($"{listener.Config.SearchId.Value}: {status}");
+                }
                 
                 // Indent additional info
-                if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds ||
+                double cooldownSeconds = listener.IsAuthenticationError ? 10 : RestartCooldownSeconds;
+                if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < cooldownSeconds ||
                     listener.ConnectionAttempts > 0)
                 {
                     ImGui.Indent();
                     
-                    if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
+                    if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < cooldownSeconds)
                     {
-                        float remainingCooldown = RestartCooldownSeconds - (float)(DateTime.Now - listener.LastErrorTime).TotalSeconds;
-                        ImGui.Text($"⏱️ Error Cooldown: {remainingCooldown:F1}s");
+                        float remainingCooldown = (float)(cooldownSeconds - (DateTime.Now - listener.LastErrorTime).TotalSeconds);
+                        if (listener.IsAuthenticationError)
+                        {
+                            ImGui.PushStyleColor(ImGuiCol.Text, 0xFF0000FF); // Red color for auth errors
+                            ImGui.Text($"🔐 Auth Error - Fix Session ID: {remainingCooldown:F1}s");
+                            ImGui.PopStyleColor();
+                        }
+                        else
+                        {
+                            ImGui.Text($"⏱️ Error Cooldown: {remainingCooldown:F1}s");
+                        }
                     }
                     
                     if (listener.ConnectionAttempts > 0)
@@ -87,20 +119,36 @@ public partial class JewYourItem
             
             ImGui.Spacing();
             ImGui.Text($"📊 Status: {_listeners.Count(l => l.IsRunning)}/{_listeners.Count} active");
+            
+            // Show authentication error help if any listener has auth errors
+            if (_listeners.Any(l => l.IsAuthenticationError))
+            {
+                ImGui.Spacing();
+                ImGui.PushStyleColor(ImGuiCol.Text, 0xFF0000FF); // Red color
+                ImGui.Text("🔐 Authentication Error Detected!");
+                ImGui.PopStyleColor();
+                ImGui.Text("💡 Fix: Update your POESESSID in settings");
+                ImGui.Text("📋 Get it from browser cookies on pathofexile.com");
+            }
         }
         else
         {
             ImGui.Text("🔍 No active searches");
         }
         
-        if (_recentItems.Count > 0)
+        RecentItem[] itemsArray;
+        lock (_recentItemsLock)
+        {
+            itemsArray = _recentItems.ToArray(); // Convert to array to avoid modification during iteration
+        }
+        
+        if (itemsArray.Length > 0)
         {
             ImGui.Separator();
             ImGui.Text("📦 Recent Items:");
             ImGui.Spacing();
             
             var itemsToRemove = new List<RecentItem>();
-            var itemsArray = _recentItems.ToArray(); // Convert to array to avoid modification during iteration
             
             for (int i = 0; i < itemsArray.Length; i++)
             {
@@ -194,6 +242,13 @@ public partial class JewYourItem
 
     public override void DrawSettings()
     {
+        // Check if plugin was just disabled and clean up if needed
+        if (!Settings.Enable.Value && _listeners.Count > 0)
+        {
+            LogMessage("🛑 PLUGIN DISABLED: Force stopping all listeners from DrawSettings method");
+            ForceStopAll();
+        }
+        
         ImGui.Text("Session ID:");
         ImGui.SameLine();
         ImGui.InputText("##SessionId", ref _sessionIdBuffer, 100, ImGuiInputTextFlags.Password);
@@ -235,6 +290,24 @@ public partial class JewYourItem
                 {
                     Settings.TravelHotkey.Value = key;
                     LogMessage($"Hotkey changed to: {key}");
+                    break;
+                }
+            }
+        }
+
+        var stopAllHotkey = Settings.StopAllHotkey.Value.ToString();
+        ImGui.Text("Stop All Searches Hotkey:");
+        ImGui.SameLine();
+        ImGui.InputText("##StopAllHotkey", ref stopAllHotkey, 100, ImGuiInputTextFlags.ReadOnly);
+        if (ImGui.IsItemActive())
+        {
+            LogMessage("Waiting for new stop all hotkey input...");
+            foreach (Keys key in Enum.GetValues(typeof(Keys)))
+            {
+                if (IsKeyPressed(key) && key != Keys.None)
+                {
+                    Settings.StopAllHotkey.Value = key;
+                    LogMessage($"Stop All hotkey changed to: {key}");
                     break;
                 }
             }
@@ -327,10 +400,13 @@ public partial class JewYourItem
         {
             Settings.MaxRecentItems.Value = maxRecentItems;
             // Trim queue if new limit is smaller
-            while (_recentItems.Count > maxRecentItems)
-                _recentItems.Dequeue();
+            lock (_recentItemsLock)
+            {
+                while (_recentItems.Count > maxRecentItems)
+                    _recentItems.Dequeue();
+            }
             _settingsUpdated = true;
-            LogMessage($"Max Recent Items setting changed to: {maxRecentItems}");
+            LogDebug($"Max Recent Items setting changed to: {maxRecentItems}");
         }
         if (!ImGui.IsItemActive())
         {
@@ -378,15 +454,23 @@ public partial class JewYourItem
         ImGui.Separator();
         if (ImGui.Button("Test Move Mouse to Recent Item"))
         {
-            if (_recentItems.Count > 0)
+            RecentItem item = null;
+            lock (_recentItemsLock)
             {
-                var item = _recentItems.Peek();
-                LogMessage($"Testing move mouse to recent item: {item.Name} at ({item.X}, {item.Y})");
+                if (_recentItems.Count > 0)
+                {
+                    item = _recentItems.Peek();
+                }
+            }
+            
+            if (item != null)
+            {
+                LogDebug($"Testing move mouse to recent item: {item.Name} at ({item.X}, {item.Y})");
                 MoveMouseToItemLocation(item.X, item.Y);
             }
             else
             {
-                LogMessage("No recent items available for mouse movement test");
+                LogDebug("No recent items available for mouse movement test");
             }
         }
         if (ImGui.IsItemHovered())

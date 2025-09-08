@@ -19,11 +19,17 @@ public class JewYourItemSettings : ISettings
     }
 
     public ToggleNode Enable { get; set; } = new ToggleNode(true);
+    [Menu("Debug Mode", "Enable detailed logging for debugging")]
+    [IgnoreMenu]
+    public ToggleNode DebugMode { get; set; } = new ToggleNode(false);
     [IgnoreMenu]
     public TextNode SessionId { get; set; } = new TextNode("");
     [Menu("Travel Hotkey", "Key to initiate travel action")]
     [IgnoreMenu]
     public HotkeyNode TravelHotkey { get; set; } = new HotkeyNode(Keys.F5);
+    [Menu("Stop All Hotkey", "Key to force stop all searches")]
+    [IgnoreMenu]
+    public HotkeyNode StopAllHotkey { get; set; } = new HotkeyNode(Keys.F7);
     [Menu("Play Sound", "Enable sound alerts for new items")]
     [IgnoreMenu]
     public ToggleNode PlaySound { get; set; } = new ToggleNode(true);
@@ -103,6 +109,7 @@ public class JewYourItemSettings : ISettings
             ImGui.Checkbox("Enable", ref enable);
             _parent.Enable.Value = enable;
             ImGui.Text("Groups:");
+            HelpMarker("💡 Tip: Shift+Click group or search names to quickly toggle enable/disable");
             ImGui.Separator();
             var tempGroups = new List<SearchGroup>(_parent.Groups);
             for (int i = 0; i < tempGroups.Count; i++)
@@ -115,6 +122,8 @@ public class JewYourItemSettings : ISettings
                 }
                 var groupNameBuffer = _groupNameBuffers[groupIdKey];
                 groupNameBuffer = group.Name.Value; // Sync buffer with current value
+                
+                // Apply colors based on current state
                 if (group.Enable.Value)
                 {
                     ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.0f, 1.0f, 0.0f, 1.0f));
@@ -122,7 +131,27 @@ public class JewYourItemSettings : ISettings
                 }
                 bool isOpen = ImGui.CollapsingHeader($"Group##group{i}"); // Static ID for header
                 ImGui.SameLine();
+                
+                // Add visual indicator for enabled/disabled state
+                if (group.Enable.Value)
+                {
+                    ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), "● "); // Green dot for enabled
+                }
+                else
+                {
+                    ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1.0f), "○ "); // Gray dot for disabled
+                }
+                
+                ImGui.SameLine();
                 ImGui.Text(group.Name.Value); // Display dynamic name
+                
+                // Shift+Click to enable/disable group
+                if (ImGui.IsItemClicked(ImGuiMouseButton.Left) && ImGui.GetIO().KeyShift)
+                {
+                    group.Enable.Value = !group.Enable.Value;
+                    // Visual feedback is provided by the colored dots
+                }
+                
                 if (_parent.CancelWithRightClick.Value && ImGui.IsItemClicked(ImGuiMouseButton.Right))
                 {
                     ImGui.OpenPopup($"RemoveGroupContext{i}");
@@ -216,7 +245,27 @@ public class JewYourItemSettings : ISettings
                         }
                         bool sOpen = ImGui.CollapsingHeader($"Search##search{i}{j}"); // Static ID for header
                         ImGui.SameLine();
+                        
+                        // Add visual indicator for enabled/disabled state
+                        if (search.Enable.Value)
+                        {
+                            ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), "● "); // Green dot for enabled
+                        }
+                        else
+                        {
+                            ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1.0f), "○ "); // Gray dot for disabled
+                        }
+                        
+                        ImGui.SameLine();
                         ImGui.Text(search.Name.Value); // Display dynamic name
+                        
+                        // Shift+Click to enable/disable search
+                        if (ImGui.IsItemClicked(ImGuiMouseButton.Left) && ImGui.GetIO().KeyShift)
+                        {
+                            search.Enable.Value = !search.Enable.Value;
+                            // Visual feedback is provided by the colored dots
+                        }
+                        
                         if (_parent.CancelWithRightClick.Value && ImGui.IsItemClicked(ImGuiMouseButton.Right))
                         {
                             tempSearches.RemoveAt(j);

@@ -18,7 +18,19 @@ public class RecentItem
 
     public bool IsTokenExpired()
     {
-        return DateTime.Now >= TokenExpiresAt.AddSeconds(-30); // 30 second buffer before actual expiration
+        // If TokenExpiresAt is MinValue (failed parsing), consider it expired
+        if (TokenExpiresAt == DateTime.MinValue)
+            return true;
+            
+        // Safely calculate expiration with 30 second buffer
+        // Instead of subtracting from TokenExpiresAt, add to current time
+        var currentTimePlus30 = DateTime.Now.AddSeconds(30);
+        
+        // Check for overflow in the addition (though very unlikely)
+        if (currentTimePlus30 < DateTime.Now)
+            return false; // If overflow occurred, assume not expired
+            
+        return currentTimePlus30 >= TokenExpiresAt;
     }
 
     public override string ToString()
@@ -40,8 +52,36 @@ public class RecentItem
             dynamic tokenData = JsonConvert.DeserializeObject(json);
             long iat = tokenData?.iat ?? 0;
             long exp = tokenData?.exp ?? 0;
-            var issuedAt = iat > 0 ? DateTimeOffset.FromUnixTimeSeconds(iat).DateTime : DateTime.MinValue;
-            var expiresAt = exp > 0 ? DateTimeOffset.FromUnixTimeSeconds(exp).DateTime : DateTime.MinValue;
+            
+            // Validate Unix timestamps to prevent DateTime overflow
+            // Unix timestamp valid range: roughly 1970 to 3000 (0 to ~32 billion)
+            DateTime issuedAt = DateTime.MinValue;
+            DateTime expiresAt = DateTime.MinValue;
+            
+            if (iat > 0 && iat <= 32503680000) // Valid range check
+            {
+                try
+                {
+                    issuedAt = DateTimeOffset.FromUnixTimeSeconds(iat).DateTime;
+                }
+                catch
+                {
+                    issuedAt = DateTime.MinValue;
+                }
+            }
+            
+            if (exp > 0 && exp <= 32503680000) // Valid range check
+            {
+                try
+                {
+                    expiresAt = DateTimeOffset.FromUnixTimeSeconds(exp).DateTime;
+                }
+                catch
+                {
+                    expiresAt = DateTime.MinValue;
+                }
+            }
+            
             return (issuedAt, expiresAt);
         }
         catch

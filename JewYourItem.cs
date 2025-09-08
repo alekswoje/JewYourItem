@@ -29,6 +29,25 @@ namespace JewYourItem;
 
 public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 {
+    // Debug-aware logging methods
+    private void LogDebug(string message)
+    {
+        if (Settings.DebugMode.Value)
+        {
+            LogMessage($"[DEBUG] {message}");
+        }
+    }
+    
+    private void LogInfo(string message)
+    {
+        LogMessage($"[INFO] {message}");
+    }
+    
+    private void LogWarning(string message)
+    {
+        LogMessage($"[WARN] {message}");
+    }
+    
     // Windows API declarations for mouse clicks
     [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
     public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, UIntPtr dwExtraInfo);
@@ -72,10 +91,15 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private string _sessionIdBuffer = "";
     private List<string> _recentResponses = new List<string>();
     private const int MaxResponses = 5;
-    private static readonly HttpClient _httpClient = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli });
+    private static readonly HttpClient _httpClient = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli })
+    {
+        Timeout = TimeSpan.FromSeconds(30) // 30 second timeout to prevent infinite hangs
+    };
     private Queue<RecentItem> _recentItems = new Queue<RecentItem>();
+    private readonly object _recentItemsLock = new object(); // Thread safety for _recentItems queue
     private bool _playSound = true;
     private bool _lastHotkeyState = false;
+    private bool _lastStopAllState = false;
     private DateTime _lastTpTime = DateTime.MinValue;
     private bool _settingsUpdated = false;
     private SearchListener _activeListener;
@@ -86,7 +110,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private ConservativeRateLimiter _rateLimiter;
     private bool _lastPurchaseWindowVisible = false;
     private static int _globalConnectionAttempts = 0;
-    private static DateTime _pluginStartTime = DateTime.Now;
+    public static DateTime _pluginStartTime = DateTime.Now;
     private static DateTime _lastGlobalReset = DateTime.Now;
     private static bool _emergencyShutdown = false;
     private static readonly Random _random = new Random();
@@ -111,70 +135,70 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         _sessionIdBuffer = Settings.SessionId.Value ?? "";
         if (string.IsNullOrEmpty(_sessionIdBuffer))
         {
-            LogMessage("Warning: Session ID is empty. Please set it in the settings.");
+            LogWarning("Warning: Session ID is empty. Please set it in the settings.");
         }
         
-        LogMessage("                                                                                                    ");
-        LogMessage("::::::::::::::::::::::::::::::::::::::::::::::::::-*@@@@@@%+:::::*=::=-:::::::::::::::::::::::::: ");
-        LogMessage("::::::::::::::::::::::::::::::::::::::::::::::=@@@+*@@#=@*+*@#@@@%@+=@+%+::::::::::::::::::::::::: ");
-        LogMessage(":::::::::::::::::::::::::::::::::::::::::::+@@@=+::*@@@#*+**%+@%@@*@%@@@#:=+:::::::::::::::::::::: ");
-        LogMessage(":::::::::::::::::::::::::::::::::::::::::#@%-::-*@@*:::::::::::=#*@#%@@@*@@+:::::::::::::::::::::: ");
-        LogMessage("::::::::::::::::::::::::::::::::::::::-@@%:@:*@*:::::::::::::::::::::-@@+@#@::::::::::::::::::::: ");
-        LogMessage(":::::::::::::::::::::::::::::::::::::+@+@@=@%:::::::::::::::::::::::::::==::@*::::::::::::::::::: ");
-        LogMessage("::::::::::::::::::::::::::::::::::::=@*@-@*@:::::::::::::::::::::::::::::::::=@-::::::::::::::::: ");
-        LogMessage(":::::::::::::::::::::::::::::::::::=@-@@@%#@*::::::::::::::::::::::::::::::::::@::::::::::::::::: ");
-        LogMessage(":::::::::::::::::::::::::::::::::::%@=@@@#%@#+%+-%@::::::::::::::::::::::::::::+@:::::::::::::::: ");
-        LogMessage(":::::::::::::::::::::::::::::::::::@+%=@%#@*@@@#@@-:::::::::::::::::::::::::::::+*::::::::::::::: ");
-        LogMessage(":::::::::::::::::::::::::::::::::-@@@@@@@+@@%@*+=-=@*:::::::::::::::::::::::::::*%:::::::::::::: ");
-        LogMessage("::::::::::::::::::::::::::::::=@%-@@@%@@*@@@=@@@@@@*::::*@%:#@--+::::+@@@@@#::::::+#::::::::::::: ");
-        LogMessage(":::::::::::::::::::::::::::::*#*@+@%+@#@@#@%@@*%-=-::::%@#:*=@+*%@%=-::*@@@%-+@@:::@-:::::::::::: ");
-        LogMessage(":::::::::::::::::::::-*%@@@#-#%=@@@@*@@@@@@@@%#@@*@+::::-##@@@*@@@@@@@-:=:::+-:::::**-=:::::::::: ");
-        LogMessage("::::::::::::::::::*%*-:=:::::=%@@#@@*@@%@@##@#@@*=::::::@@@:::::::-+%@@@%*#@#*@#@@@+%@+:::::::::: ");
-        LogMessage("::::::::::::::::%*-:::::=%+::+@%@@@@@#+@@@@%%+*#::::-:::@:=:::@@@@@@@#:=@@@-+@@*%@@*:@::::::::::: ");
-        LogMessage(":::::::::::::::@::::::::::+*:::::@@-:---:=@@@@%-::==::#@%*-=*@@-=@++:@*:::+::-@@=-:%@%::::::::::: ");
-        LogMessage(":::::::::::::-@:::%-:::::::@-::::@--@=-+@@-:@@@-::::::***@@@@-#@@@@@@@@::@+::::@@@@-*+::::::::::: ");
-        LogMessage(":::::::::::::%:::=@:::::::::%:::=@:-@=:*@:%+@@::-:-+:::::::::-::-++@+=::::::::::::-@#:::::::::::: ");
-        LogMessage("::::::::::::@-:::@::::::::::@+::-@:-@*:@@:-=@@=:+++-::::::::::::::::::::::::::::::::*#::::::::::: ");
-        LogMessage(":::::::::::@::::=+::::::::::-@::+@=:%*:@@:-@@#=:=*=::::::::::::::::::::::::::::::::::-@:::::::::: ");
-        LogMessage("::::::::::@-::::@:::::::::::::@::@%*:::-:::@@@*=@==-::-:::::::::::::::::::::::::::::::=@::::::::: ");
-        LogMessage(":::::::::=@*:::-@:::::::::::::=@:@-+@:@@::-@@@%@@-@@%:@%*@@=:=+:::::::@@%-:-%%:::::::::##:::::::: ");
-        LogMessage(":::::::::*+%:::-@::::::::::::::#=@=:@+::::=@%+*@@=*@@%@:-:::-@*@==:+@@=::::::-@-:--:::::%:::::::: ");
-        LogMessage("::::::::=#:-#-*=@::::::::::::::-*%@:+%:::@@@#@#@@%@@*@@-#@+@=::-#@%+:%:=#*-::::=-=-:::::%:::::::: ");
-        LogMessage(":::::::-@:::::*-@:::::::::::::::@+@::#@@@@@@@@@@@@#%@#%%=%#*@%@%##@@*#%-@@@@@+::::::::::%:::::::: ");
-        LogMessage(":::::::+*:::::=+@=::::::::::::::*%@::-%=@@+@@@@%@@+*@@@@@@@@@@@%@@@#@+#@+@@#--%#:::::-::#+::::::: ");
-        LogMessage("::::::::%-:::::-+@%:::::::::::::::@@:::+@@#@@@%@@@*%*@@@@@*+@@@@@@@@@%@@@@@:@@@*#%@@=::::=%::::::: ");
-        LogMessage("::::::::*-:::::-++#:::::::::::::::*=::::%*@*@+@@*@=#@@@@@%=@@+-::::--:::::=::-@@@-::@@+::#=::::::: ");
-        LogMessage("::::::::##::::::#-#:::::::::::::::-%::::@-==@@@@@@@@%@@@=@=:@%:#@@@-::::::-::+@@=#=::::--::::::::: ");
-        LogMessage("::::::::#:::::::@:%::::::::::::::::@-::-:@*@*@#@@*+@=#@@@%:=:@@@-:#++@@@@@%#@*@=:::::::::::::::::: ");
-        LogMessage("::::::::@@::::::#-@::::::::::::::::*#::::=@#@@@@@%@%@@@@@*:*#:=@@#+@@#::=@#*@-:::::::::::::::::::: ");
-        LogMessage("::::::::-*:#=::::*#@:::::::::::::::::%-::@@-@@@@*@*@+@#@*@@-*#::=@@@#@%@@@*@=::::::::::::::::::::: ");
-        LogMessage("::::::::@-:::::::=#%=::::::::::::::::-@::@@@@*%@@-@@@@@@@@*@@+%@+:::::+@@@#:#@@:::::::::::::::::::: ");
-        LogMessage("::::::::-@-::::::::@=#:::::::::::::::::-@=*:=@#+##@@=@@@@@@@@@@@%@@*:::::::-#@#@@-:::::::::::::::::: ");
-        LogMessage("::::::::@%:::::::::#-%::::::::::::::::::=@:%-@@%#@#@@@@@+#@@=@@@@@@@@@@@@@@*@@@@++%#*%:::::::::::::: ");
-        LogMessage("::::::::%+%+::::::::=+#:::::::::::::::::::=%-*=%%%*#=@@=@#@@*@@@#@@@@@@@*@*@@@@@@#:=--@:::::::::::::: ");
-        LogMessage("::::::::@::+:::::::::@==:::::::::::::::::::*-*+*%@@@@#@@@@@%@@@%@@@@#@#%@@@@@+::::::+#::::::::::::::: ");
-        LogMessage("::::::=+:::::::::::::+*#::::::::::::::::::::#+@:*@+@@**@@@@@@@@@@@%@@@@@@%@@:::::*@==+%+*+-:::::::::: ");
-        LogMessage("::::::+=:::::::::::::%@-::::::::::::::::::::#*+:-@@*-@@=#@+@@@@@@#@@@%*@@@:::::-@+:::@:::=+::::::::: ");
-        LogMessage("::::::*-:::::::::::::+*-:::::::::::::::::::::@%::-#:@@@+@@@@#@@%@@+@=@@@-::::::-:@%-%=::-@@#:::::::: ");
-        LogMessage("::::::+-::::::::::::::@+=:::::::::::::::::::::*+*%=%:=@+@@@@+=@@@@@@@@%-=::::::::@@+::+=:::#@::::::: ");
-        LogMessage("::::::=+::::::::::::::+##+:::::::::::::::::::::%+*:=*@@:*@#@*@@@@#@@%:+::::::::::::::-+:::#@%::::::: ");
-        LogMessage("::::::::::::::::::::::#--::::::::::::::::::-@@%%#::#@%:=#@@@*:::::=%-::::::::::::*%-::+*#-::#:::::: ");
-        LogMessage("::::::::::::::::::::::@:::::::::::::::::=@%-::+@#*==-::::::::::::::@::::::%@=-=#@@@:::::::+*:::::: ");
-        LogMessage(":::::::::::::::::::::::%::::::::::::::::@=:::-*:::::::::::::::::::*=@:::::::::::::-::+@+-*%::::::: ");
-        LogMessage("::::::::::::::::::::::+#::::::::::::::::::::@-:::::::::::::::::::-**=:::+@@*@#%@*=@*@#@-#:::::::: ");
-        LogMessage(":::::::::::::::::::::::+*::::::::::::::::::*@:::::::::::::::::::::*+=::-@+-@:%+*-=*#=:-@-:::::::: ");
-        LogMessage("::::::::::::::::::::::::+%:::::::::::::::::*::::::::+-:::::::::::==#:*:+*::*:::*::+@-:*=::::::::: ");
-        LogMessage("::::::::::::::::::::::::::#::::::::::::::::=::::::::#-::::::::::=@%===*-@@@@:-*@@#@-=*-:::::::::: ");
-        LogMessage("::::::::::::::::::::::::::::##:::::::::::::::::::::#=::::::#*:::::::::::::::::::::::::::::::::::: ");
-        LogMessage("                                                                                                    ");
+        LogDebug("                                                                                                    ");
+        LogDebug("::::::::::::::::::::::::::::::::::::::::::::::::::-*@@@@@@%+:::::*=::=-:::::::::::::::::::::::::: ");
+        LogDebug("::::::::::::::::::::::::::::::::::::::::::::::=@@@+*@@#=@*+*@#@@@%@+=@+%+::::::::::::::::::::::::: ");
+        LogDebug(":::::::::::::::::::::::::::::::::::::::::::+@@@=+::*@@@#*+**%+@%@@*@%@@@#:=+:::::::::::::::::::::: ");
+        LogDebug(":::::::::::::::::::::::::::::::::::::::::#@%-::-*@@*:::::::::::=#*@#%@@@*@@+:::::::::::::::::::::: ");
+        LogDebug("::::::::::::::::::::::::::::::::::::::-@@%:@:*@*:::::::::::::::::::::-@@+@#@::::::::::::::::::::: ");
+        LogDebug(":::::::::::::::::::::::::::::::::::::+@+@@=@%:::::::::::::::::::::::::::==::@*::::::::::::::::::: ");
+        LogDebug("::::::::::::::::::::::::::::::::::::=@*@-@*@:::::::::::::::::::::::::::::::::=@-::::::::::::::::: ");
+        LogDebug(":::::::::::::::::::::::::::::::::::=@-@@@%#@*::::::::::::::::::::::::::::::::::@::::::::::::::::: ");
+        LogDebug(":::::::::::::::::::::::::::::::::::%@=@@@#%@#+%+-%@::::::::::::::::::::::::::::+@:::::::::::::::: ");
+        LogDebug(":::::::::::::::::::::::::::::::::::@+%=@%#@*@@@#@@-:::::::::::::::::::::::::::::+*::::::::::::::: ");
+        LogDebug(":::::::::::::::::::::::::::::::::-@@@@@@@+@@%@*+=-=@*:::::::::::::::::::::::::::*%:::::::::::::: ");
+        LogDebug("::::::::::::::::::::::::::::::=@%-@@@%@@*@@@=@@@@@@*::::*@%:#@--+::::+@@@@@#::::::+#::::::::::::: ");
+        LogDebug(":::::::::::::::::::::::::::::*#*@+@%+@#@@#@%@@*%-=-::::%@#:*=@+*%@%=-::*@@@%-+@@:::@-:::::::::::: ");
+        LogDebug(":::::::::::::::::::::-*%@@@#-#%=@@@@*@@@@@@@@%#@@*@+::::-##@@@*@@@@@@@-:=:::+-:::::**-=:::::::::: ");
+        LogDebug("::::::::::::::::::*%*-:=:::::=%@@#@@*@@%@@##@#@@*=::::::@@@:::::::-+%@@@%*#@#*@#@@@+%@+:::::::::: ");
+        LogDebug("::::::::::::::::%*-:::::=%+::+@%@@@@@#+@@@@%%+*#::::-:::@:=:::@@@@@@@#:=@@@-+@@*%@@*:@::::::::::: ");
+        LogDebug(":::::::::::::::@::::::::::+*:::::@@-:---:=@@@@%-::==::#@%*-=*@@-=@++:@*:::+::-@@=-:%@%::::::::::: ");
+        LogDebug(":::::::::::::-@:::%-:::::::@-::::@--@=-+@@-:@@@-::::::***@@@@-#@@@@@@@@::@+::::@@@@-*+::::::::::: ");
+        LogDebug(":::::::::::::%:::=@:::::::::%:::=@:-@=:*@:%+@@::-:-+:::::::::-::-++@+=::::::::::::-@#:::::::::::: ");
+        LogDebug("::::::::::::@-:::@::::::::::@+::-@:-@*:@@:-=@@=:+++-::::::::::::::::::::::::::::::::*#::::::::::: ");
+        LogDebug(":::::::::::@::::=+::::::::::-@::+@=:%*:@@:-@@#=:=*=::::::::::::::::::::::::::::::::::-@:::::::::: ");
+        LogDebug("::::::::::@-::::@:::::::::::::@::@%*:::-:::@@@*=@==-::-:::::::::::::::::::::::::::::::=@::::::::: ");
+        LogDebug(":::::::::=@*:::-@:::::::::::::=@:@-+@:@@::-@@@%@@-@@%:@%*@@=:=+:::::::@@%-:-%%:::::::::##:::::::: ");
+        LogDebug(":::::::::*+%:::-@::::::::::::::#=@=:@+::::=@%+*@@=*@@%@:-:::-@*@==:+@@=::::::-@-:--:::::%:::::::: ");
+        LogDebug("::::::::=#:-#-*=@::::::::::::::-*%@:+%:::@@@#@#@@%@@*@@-#@+@=::-#@%+:%:=#*-::::=-=-:::::%:::::::: ");
+        LogDebug(":::::::-@:::::*-@:::::::::::::::@+@::#@@@@@@@@@@@@#%@#%%=%#*@%@%##@@*#%-@@@@@+::::::::::%:::::::: ");
+        LogDebug(":::::::+*:::::=+@=::::::::::::::*%@::-%=@@+@@@@%@@+*@@@@@@@@@@@%@@@#@+#@+@@#--%#:::::-::#+::::::: ");
+        LogDebug("::::::::%-:::::-+@%:::::::::::::::@@:::+@@#@@@%@@@*%*@@@@@*+@@@@@@@@@%@@@@@:@@@*#%@@=::::=%::::::: ");
+        LogDebug("::::::::*-:::::-++#:::::::::::::::*=::::%*@*@+@@*@=#@@@@@%=@@+-::::--:::::=::-@@@-::@@+::#=::::::: ");
+        LogDebug("::::::::##::::::#-#:::::::::::::::-%::::@-==@@@@@@@@%@@@=@=:@%:#@@@-::::::-::+@@=#=::::--::::::::: ");
+        LogDebug("::::::::#:::::::@:%::::::::::::::::@-::-:@*@*@#@@*+@=#@@@%:=:@@@-:#++@@@@@%#@*@=:::::::::::::::::: ");
+        LogDebug("::::::::@@::::::#-@::::::::::::::::*#::::=@#@@@@@%@%@@@@@*:*#:=@@#+@@#::=@#*@-:::::::::::::::::::: ");
+        LogDebug("::::::::-*:#=::::*#@:::::::::::::::::%-::@@-@@@@*@*@+@#@*@@-*#::=@@@#@%@@@*@=::::::::::::::::::::: ");
+        LogDebug("::::::::@-:::::::=#%=::::::::::::::::-@::@@@@*%@@-@@@@@@@@*@@+%@+:::::+@@@#:#@@:::::::::::::::::::: ");
+        LogDebug("::::::::-@-::::::::@=#:::::::::::::::::-@=*:=@#+##@@=@@@@@@@@@@@%@@*:::::::-#@#@@-:::::::::::::::::: ");
+        LogDebug("::::::::@%:::::::::#-%::::::::::::::::::=@:%-@@%#@#@@@@@+#@@=@@@@@@@@@@@@@@*@@@@++%#*%:::::::::::::: ");
+        LogDebug("::::::::%+%+::::::::=+#:::::::::::::::::::=%-*=%%%*#=@@=@#@@*@@@#@@@@@@@*@*@@@@@@#:=--@:::::::::::::: ");
+        LogDebug("::::::::@::+:::::::::@==:::::::::::::::::::*-*+*%@@@@#@@@@@%@@@%@@@@#@#%@@@@@+::::::+#::::::::::::::: ");
+        LogDebug("::::::=+:::::::::::::+*#::::::::::::::::::::#+@:*@+@@**@@@@@@@@@@@%@@@@@@%@@:::::*@==+%+*+-:::::::::: ");
+        LogDebug("::::::+=:::::::::::::%@-::::::::::::::::::::#*+:-@@*-@@=#@+@@@@@@#@@@%*@@@:::::-@+:::@:::=+::::::::: ");
+        LogDebug("::::::*-:::::::::::::+*-:::::::::::::::::::::@%::-#:@@@+@@@@#@@%@@+@=@@@-::::::-:@%-%=::-@@#:::::::: ");
+        LogDebug("::::::+-::::::::::::::@+=:::::::::::::::::::::*+*%=%:=@+@@@@+=@@@@@@@@%-=::::::::@@+::+=:::#@::::::: ");
+        LogDebug("::::::=+::::::::::::::+##+:::::::::::::::::::::%+*:=*@@:*@#@*@@@@#@@%:+::::::::::::::-+:::#@%::::::: ");
+        LogDebug("::::::::::::::::::::::#--::::::::::::::::::-@@%%#::#@%:=#@@@*:::::=%-::::::::::::*%-::+*#-::#:::::: ");
+        LogDebug("::::::::::::::::::::::@:::::::::::::::::=@%-::+@#*==-::::::::::::::@::::::%@=-=#@@@:::::::+*:::::: ");
+        LogDebug(":::::::::::::::::::::::%::::::::::::::::@=:::-*:::::::::::::::::::*=@:::::::::::::-::+@+-*%::::::: ");
+        LogDebug("::::::::::::::::::::::+#::::::::::::::::::::@-:::::::::::::::::::-**=:::+@@*@#%@*=@*@#@-#:::::::: ");
+        LogDebug(":::::::::::::::::::::::+*::::::::::::::::::*@:::::::::::::::::::::*+=::-@+-@:%+*-=*#=:-@-:::::::: ");
+        LogDebug("::::::::::::::::::::::::+%:::::::::::::::::*::::::::+-:::::::::::==#:*:+*::*:::*::+@-:*=::::::::: ");
+        LogDebug("::::::::::::::::::::::::::#::::::::::::::::=::::::::#-::::::::::=@%===*-@@@@:-*@@#@-=*-:::::::::: ");
+        LogDebug("::::::::::::::::::::::::::::##:::::::::::::::::::::#=::::::#*:::::::::::::::::::::::::::::::::::: ");
+        LogDebug("                                                                                                    ");
         
-        LogMessage("Plugin initialized");
-        LogMessage($"Hotkey set to: {Settings.TravelHotkey.Value}");
-        LogMessage($"Sound enabled: {Settings.PlaySound.Value}");
-        LogMessage($"Auto TP enabled: {Settings.AutoTp.Value}");
-        LogMessage($"GUI enabled: {Settings.ShowGui.Value}");
-        LogMessage("TP Cooldown: Using dynamic locking (locked until window loads or 10s timeout)");
-        LogMessage($"Move Mouse to Item enabled: {Settings.MoveMouseToItem.Value}");
+        LogDebug("Plugin initialized");
+        LogDebug($"Hotkey set to: {Settings.TravelHotkey.Value}");
+        LogDebug($"Sound enabled: {Settings.PlaySound.Value}");
+        LogDebug($"Auto TP enabled: {Settings.AutoTp.Value}");
+        LogDebug($"GUI enabled: {Settings.ShowGui.Value}");
+        LogDebug("TP Cooldown: Using dynamic locking (locked until window loads or 10s timeout)");
+        LogDebug($"Move Mouse to Item enabled: {Settings.MoveMouseToItem.Value}");
 
         return true;
     }
@@ -185,15 +209,16 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     public override void AreaChange(AreaInstance area)
     {
-        LogMessage($"🌍 AREA CHANGE: {area?.Area?.Name ?? "Unknown"} - NOT stopping listeners (live searches continue)");
+        LogDebug($"🌍 AREA CHANGE: {area?.Area?.Name ?? "Unknown"} - NOT stopping listeners (live searches continue)");
         _lastAreaChangeTime = DateTime.Now;
         
         // DON'T stop all listeners - let them continue running
         // Live searches should persist across zone changes
-        // Only clear recent items as they're location-specific
-        _recentItems.Clear();
+        // DON'T clear recent items - let the user manage them manually
+        // Items can still be valid across zone changes (especially to/from hideout)
+        
         // DON'T clear _teleportedItemLocation - we need it to persist until purchase window opens
-        LogMessage("📦 Cleared recent items due to area change (preserved teleported location for mouse movement)");
+        LogDebug("🌍 AREA CHANGE: Keeping recent items list intact for user to manage");
     }
 
     // LearnPurchaseWindowCoordinates method moved to JewYourItem.Gui.cs
@@ -215,7 +240,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         // CRITICAL: IMMEDIATE PLUGIN DISABLE CHECK - HIGHEST PRIORITY
         if (!Settings.Enable.Value)
         {
-            LogMessage("🛑 PLUGIN DISABLED: Stopping all listeners immediately");
+            LogDebug("🛑 PLUGIN DISABLED: Stopping all listeners immediately");
             ForceStopAll();
             return;
         }
@@ -232,7 +257,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         // CRITICAL: Check TP lock timeout to prevent infinite locks
         if (_tpLocked && (DateTime.Now - _tpLockedTime).TotalSeconds >= 10)
         {
-            LogMessage("🔓 TP UNLOCKED: 10-second timeout reached in Tick(), unlocking TP");
+            LogDebug("🔓 TP UNLOCKED: 10-second timeout reached in Tick(), unlocking TP");
             _tpLocked = false;
             _tpLockedTime = DateTime.MinValue;
         }
@@ -249,7 +274,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             _lastEnableState = Settings.Enable.Value;
             if (!Settings.Enable.Value)
             {
-                LogMessage("🛑 PLUGIN JUST DISABLED: Force stopping all listeners");
+                LogDebug("🛑 PLUGIN JUST DISABLED: Force stopping all listeners");
                 ForceStopAll();
                 return;
             }
@@ -265,7 +290,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 bool hotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
                 if (hotkeyState && !_lastHotkeyState)
                 {
-                    LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
+                    LogDebug($"Hotkey {Settings.TravelHotkey.Value} pressed");
                     TravelToHideout(isManual: true);
                 }
                 _lastHotkeyState = hotkeyState;
@@ -276,19 +301,19 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 // Track window close events (throttled)
                 if (!purchaseWindowVisible && _lastPurchaseWindowVisible)
                 {
-                    LogMessage("🚪 PURCHASE WINDOW CLOSED (Throttled): Mouse movement will be allowed on next window open");
+                    LogDebug("🚪 PURCHASE WINDOW CLOSED (Throttled): Mouse movement will be allowed on next window open");
                     _windowWasClosedSinceLastMovement = true;
                     _allowMouseMovement = true;
                 }
                 
                 if (purchaseWindowVisible && !_lastPurchaseWindowVisible)
                 {
-                    LogMessage($"🖱️ PURCHASE WINDOW OPENED (Throttled): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
+                    LogDebug($"🖱️ PURCHASE WINDOW OPENED (Throttled): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
                     
                     // Unlock TP when purchase window opens
                     if (_tpLocked)
                     {
-                        LogMessage("🔓 TP UNLOCKED (Throttled): Purchase window opened successfully");
+                        LogDebug("🔓 TP UNLOCKED (Throttled): Purchase window opened successfully");
                         _tpLocked = false;
                         _tpLockedTime = DateTime.MinValue;
                     }
@@ -296,7 +321,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     // Learn purchase window coordinates for future instant mouse movement
                     if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
                     {
-                        LogMessage($"🎓 LEARNING TRIGGER (Throttled): Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                        LogDebug($"🎓 LEARNING TRIGGER (Throttled): Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
                         LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
                     }
                 }
@@ -306,24 +331,30 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     {
                         if (_teleportedItemLocation.HasValue)
                         {
-                            LogMessage($"🖱️ SAFE MOUSE MOVE (Throttled): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                            LogDebug($"🖱️ SAFE MOUSE MOVE (Throttled): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
                             MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
                             _teleportedItemLocation = null; // Clear after use
                             _allowMouseMovement = false; // Block further movement until window closes
                             _windowWasClosedSinceLastMovement = false;
                         }
-                        else if (_recentItems.Count > 0)
+                        else 
                         {
-                            LogMessage("🖱️ SAFE FALLBACK MOVE (Throttled): Window was closed, using most recent item");
-                            var item = _recentItems.Peek();
-                            MoveMouseToItemLocation(item.X, item.Y);
-                            _allowMouseMovement = false; // Block further movement until window closes
+                            lock (_recentItemsLock)
+                            {
+                                if (_recentItems.Count > 0)
+                                {
+                                    LogDebug("🖱️ SAFE FALLBACK MOVE (Throttled): Window was closed, using most recent item");
+                                    var item = _recentItems.Peek();
+                                    MoveMouseToItemLocation(item.X, item.Y);
+                                    _allowMouseMovement = false; // Block further movement until window closes
+                                }
+                            }
                             _windowWasClosedSinceLastMovement = false;
                         }
                     }
                     else
                     {
-                        LogMessage("🚫 MOUSE MOVE BLOCKED (Throttled): Purchase window opened but previous window was not closed (preventing accidental purchases)");
+                        LogDebug("🚫 MOUSE MOVE BLOCKED (Throttled): Purchase window opened but previous window was not closed (preventing accidental purchases)");
                     }
                 }
                 _lastPurchaseWindowVisible = purchaseWindowVisible;
@@ -338,7 +369,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             // Only log once to avoid spam
             if (!_areaChangeCooldownLogged)
             {
-                LogMessage($"🌍 AREA CHANGE COOLDOWN: Skipping listener management for 5s after area change (can be overridden by settings changes)");
+                LogDebug($"🌍 AREA CHANGE COOLDOWN: Skipping listener management for 5s after area change (can be overridden by settings changes)");
                 _areaChangeCooldownLogged = true;
             }
             
@@ -348,7 +379,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 bool areaChangeHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
                 if (areaChangeHotkeyState && !_lastHotkeyState)
                 {
-                    LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
+                    LogDebug($"Hotkey {Settings.TravelHotkey.Value} pressed");
                     TravelToHideout(isManual: true);
                 }
                 _lastHotkeyState = areaChangeHotkeyState;
@@ -358,19 +389,19 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 // Track window close events (area change)
                 if (!areaChangePurchaseWindowVisible && _lastPurchaseWindowVisible)
                 {
-                    LogMessage("🚪 PURCHASE WINDOW CLOSED (Area): Mouse movement will be allowed on next window open");
+                    LogDebug("🚪 PURCHASE WINDOW CLOSED (Area): Mouse movement will be allowed on next window open");
                     _windowWasClosedSinceLastMovement = true;
                     _allowMouseMovement = true;
                 }
                 
                 if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible)
                 {
-                    LogMessage($"🖱️ PURCHASE WINDOW OPENED (Area): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
+                    LogDebug($"🖱️ PURCHASE WINDOW OPENED (Area): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
                     
                     // Unlock TP when purchase window opens
                     if (_tpLocked)
                     {
-                        LogMessage("🔓 TP UNLOCKED (Area): Purchase window opened successfully");
+                        LogDebug("🔓 TP UNLOCKED (Area): Purchase window opened successfully");
                         _tpLocked = false;
                         _tpLockedTime = DateTime.MinValue;
                     }
@@ -378,7 +409,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     // Learn purchase window coordinates for future instant mouse movement
                     if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
                     {
-                        LogMessage($"🎓 LEARNING TRIGGER (Area): Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                        LogDebug($"🎓 LEARNING TRIGGER (Area): Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
                         LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
                     }
                 }
@@ -388,24 +419,30 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     {
                         if (_teleportedItemLocation.HasValue)
                         {
-                            LogMessage($"🖱️ SAFE MOUSE MOVE (Area): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                            LogDebug($"🖱️ SAFE MOUSE MOVE (Area): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
                             MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
                             _teleportedItemLocation = null; // Clear after use
                             _allowMouseMovement = false; // Block further movement until window closes
                             _windowWasClosedSinceLastMovement = false;
                         }
-                        else if (_recentItems.Count > 0)
+                        else 
                         {
-                            LogMessage("🖱️ SAFE FALLBACK MOVE (Area): Window was closed, using most recent item");
-                            var item = _recentItems.Peek();
-                            MoveMouseToItemLocation(item.X, item.Y);
-                            _allowMouseMovement = false; // Block further movement until window closes
+                            lock (_recentItemsLock)
+                            {
+                                if (_recentItems.Count > 0)
+                                {
+                                    LogDebug("🖱️ SAFE FALLBACK MOVE (Area): Window was closed, using most recent item");
+                                    var item = _recentItems.Peek();
+                                    MoveMouseToItemLocation(item.X, item.Y);
+                                    _allowMouseMovement = false; // Block further movement until window closes
+                                }
+                            }
                             _windowWasClosedSinceLastMovement = false;
                         }
                     }
                     else
                     {
-                        LogMessage("🚫 MOUSE MOVE BLOCKED (Area): Purchase window opened but previous window was not closed (preventing accidental purchases)");
+                        LogDebug("🚫 MOUSE MOVE BLOCKED (Area): Purchase window opened but previous window was not closed (preventing accidental purchases)");
                     }
                 }
                 _lastPurchaseWindowVisible = areaChangePurchaseWindowVisible;
@@ -423,27 +460,38 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         // Periodic reset of global connection attempts (every 5 minutes)
         if ((DateTime.Now - _lastGlobalReset).TotalMinutes >= 5 && JewYourItem._globalConnectionAttempts > 0)
         {
-            LogMessage($"🔄 PERIODIC RESET: Clearing global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) after 5 minutes");
+            LogDebug($"🔄 PERIODIC RESET: Clearing global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) after 5 minutes");
             JewYourItem._globalConnectionAttempts = 0;
             _lastGlobalReset = DateTime.Now;
         }
         
         if (recentSettingsChange)
         {
-            LogMessage("🔄 TICK: Processing listener management (INSTANT - settings changed)...");
+            LogDebug("🔄 TICK: Processing listener management (INSTANT - settings changed)...");
         }
         else
         {
-            LogMessage("🔄 TICK: Processing listener management...");
+            LogDebug("🔄 TICK: Processing listener management...");
         }
 
         bool currentHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
         if (currentHotkeyState && !_lastHotkeyState)
         {
-            LogMessage($"🎮 MANUAL HOTKEY PRESSED: {Settings.TravelHotkey.Value} - initiating manual teleport");
+            LogInfo($"🎮 MANUAL HOTKEY PRESSED: {Settings.TravelHotkey.Value} - initiating manual teleport");
             TravelToHideout(isManual: true);
         }
         _lastHotkeyState = currentHotkeyState;
+
+        // Check Stop All hotkey
+        bool currentStopAllState = Input.GetKeyState(Settings.StopAllHotkey.Value);
+        if (currentStopAllState && !_lastStopAllState)
+        {
+            LogMessage($"🛑 STOP ALL HOTKEY PRESSED: {Settings.StopAllHotkey.Value} - force stopping all searches and disabling plugin");
+            ForceStopAll();
+            Settings.Enable.Value = false; // Disable the plugin
+            LogMessage("🔌 PLUGIN DISABLED: Stop All hotkey pressed");
+        }
+        _lastStopAllState = currentStopAllState;
 
         // Check if purchase window just became visible and learn coordinates + move mouse to teleported item
         bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
@@ -451,7 +499,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         // Track window close events to allow mouse movement on next open
         if (!currentPurchaseWindowVisible && _lastPurchaseWindowVisible)
         {
-            LogMessage("🚪 PURCHASE WINDOW CLOSED: Mouse movement will be allowed on next window open");
+            LogDebug("🚪 PURCHASE WINDOW CLOSED: Mouse movement will be allowed on next window open");
             _windowWasClosedSinceLastMovement = true;
             _allowMouseMovement = true;
         }
@@ -463,9 +511,17 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             // Unlock TP when purchase window opens
             if (_tpLocked)
             {
-                LogMessage("🔓 TP UNLOCKED: Purchase window opened successfully");
+                LogDebug("🔓 TP UNLOCKED: Purchase window opened successfully");
                 _tpLocked = false;
                 _tpLockedTime = DateTime.MinValue;
+            }
+            
+            // CRITICAL: Move mouse to item after hideout TP when merchant window opens
+            // This handles the case where hideout TP was sent but mouse movement was skipped due to open merchant window
+            if (Settings.MoveMouseToItem.Value && _teleportedItemLocation.HasValue && Settings.HasLearnedPurchaseWindow.Value)
+            {
+                LogInfo($"🎯 HIDEOUT TP MOUSE MOVE: Merchant window opened after hideout TP, moving to item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
             }
             
             // Learn purchase window coordinates for future instant mouse movement
@@ -480,7 +536,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             }
             else if (!_teleportedItemLocation.HasValue)
             {
-                LogMessage("🎓 LEARNING SKIPPED: No teleported item location available for learning");
+                LogDebug("🎓 LEARNING SKIPPED: No teleported item location available for learning");
             }
         }
         if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
@@ -495,18 +551,24 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     _allowMouseMovement = false; // Block further movement until window closes
                     _windowWasClosedSinceLastMovement = false;
                 }
-                else if (_recentItems.Count > 0)
+                else 
                 {
-                    LogMessage("🖱️ SAFE FALLBACK MOVE (Main): Window was closed, using most recent item");
-                    var item = _recentItems.Peek();
-                    MoveMouseToItemLocation(item.X, item.Y);
-                    _allowMouseMovement = false; // Block further movement until window closes
+                    lock (_recentItemsLock)
+                    {
+                        if (_recentItems.Count > 0)
+                        {
+                            LogDebug("🖱️ SAFE FALLBACK MOVE (Main): Window was closed, using most recent item");
+                            var item = _recentItems.Peek();
+                            MoveMouseToItemLocation(item.X, item.Y);
+                            _allowMouseMovement = false; // Block further movement until window closes
+                        }
+                    }
                     _windowWasClosedSinceLastMovement = false;
                 }
             }
             else
             {
-                LogMessage("🚫 MOUSE MOVE BLOCKED (Main): Purchase window opened but previous window was not closed (preventing accidental purchases)");
+                LogDebug("🚫 MOUSE MOVE BLOCKED (Main): Purchase window opened but previous window was not closed (preventing accidental purchases)");
             }
         }
         _lastPurchaseWindowVisible = currentPurchaseWindowVisible;
@@ -609,28 +671,37 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             }
             else if (!listener.IsRunning && !listener.IsConnecting)
             {
-                // Multiple safety checks before attempting restart
-                if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
+                // Multiple safety checks before attempting restart - use shorter cooldown for auth errors
+                double cooldownSeconds = listener.IsAuthenticationError ? 10 : RestartCooldownSeconds; // 10 seconds for auth errors, 300 for others
+                LogDebug($"🔍 COOLDOWN CHECK: Search {listener.Config.SearchId.Value}, IsAuthError={listener.IsAuthenticationError}, UsingCooldown={cooldownSeconds}s");
+                if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < cooldownSeconds)
                 {
-                    LogMessage($"🛡️ RESTART BLOCKED: Search {listener.Config.SearchId.Value} in error cooldown ({RestartCooldownSeconds - (DateTime.Now - listener.LastErrorTime).TotalSeconds:F1}s remaining)");
+                    if (listener.IsAuthenticationError)
+                    {
+                        LogDebug($"🔐 AUTH ERROR COOLDOWN: Search {listener.Config.SearchId.Value} waiting for session ID fix ({cooldownSeconds - (DateTime.Now - listener.LastErrorTime).TotalSeconds:F1}s remaining)");
+                    }
+                    else
+                    {
+                        LogDebug($"🛡️ RESTART BLOCKED: Search {listener.Config.SearchId.Value} in error cooldown ({cooldownSeconds - (DateTime.Now - listener.LastErrorTime).TotalSeconds:F1}s remaining)");
+                    }
                     continue;
                 }
 
                 if ((DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 60)
                 {
-                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} connection throttled ({60 - (DateTime.Now - listener.LastConnectionAttempt).TotalSeconds:F1}s remaining)");
+                    LogDebug($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} connection throttled ({60 - (DateTime.Now - listener.LastConnectionAttempt).TotalSeconds:F1}s remaining)");
                     continue;
                 }
 
                 if (listener.ConnectionAttempts >= 2 && (DateTime.Now - listener.LastConnectionAttempt).TotalHours < 1)
                 {
-                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded restart attempts (2 per HOUR)");
+                    LogDebug($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded restart attempts (2 per HOUR)");
                     continue;
                 }
 
                 if (listener.ConnectionAttempts >= 5)
                 {
-                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded TOTAL session restart limit (5 EVER)");
+                    LogDebug($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded TOTAL session restart limit (5 EVER)");
                     continue;
                 }
 
@@ -678,21 +749,25 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     continue;
                 }
                 
-                // EMERGENCY: Prevent rapid creation (but allow user-initiated restarts)
-                if (JewYourItem._globalConnectionAttempts >= 5 && !recentSettingsChange)
+                // EMERGENCY: Prevent rapid creation (but allow user-initiated restarts and startup)
+                var timeSinceStart = DateTime.Now - _pluginStartTime;
+                bool isInitialStartup = timeSinceStart.TotalMinutes < 2;
+                int creationLimit = isInitialStartup ? 20 : 5; // Allow many during startup, few during runtime
+                
+                if (JewYourItem._globalConnectionAttempts >= creationLimit && !recentSettingsChange)
                 {
-                    LogMessage($"🚨 EMERGENCY: Preventing new listener creation - global limit reached ({JewYourItem._globalConnectionAttempts} attempts)");
+                    LogDebug($"🚨 EMERGENCY: Preventing new listener creation - global limit reached ({JewYourItem._globalConnectionAttempts}/{creationLimit} attempts)");
                     continue;
                 }
-                else if (recentSettingsChange && JewYourItem._globalConnectionAttempts >= 2)
+                else if (recentSettingsChange && JewYourItem._globalConnectionAttempts >= (isInitialStartup ? 20 : 2))
                 {
                     // Reset global attempts for user-initiated changes
-                    LogMessage($"🔄 USER ACTION: Resetting global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) for settings change");
+                    LogDebug($"🔄 USER ACTION: Resetting global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) for settings change");
                     JewYourItem._globalConnectionAttempts = 0;
                 }
                 
                 // REMOVED: All rate limiting for listener creation to make startup instant
-                LogMessage($"⚡ INSTANT START: No rate limiting for maximum speed");
+                LogDebug($"⚡ INSTANT START: No rate limiting for maximum speed");
                 
                 // FINAL SAFETY CHECK: Ensure no duplicate was created during processing
                 var lastMinuteCheck = _listeners.Any(l => 
@@ -705,14 +780,14 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     continue;
                 }
                 
-                var newListener = new SearchListener(this, config, LogMessage, LogError);
+                var newListener = new SearchListener(this, config, LogMessage, LogError, LogDebug, LogInfo, LogWarning);
                 _listeners.Add(newListener);
                 LogMessage($"🆕 CREATING NEW LISTENER: Search {config.SearchId.Value} (Total listeners: {_listeners.Count})");
                 newListener.Start(LogMessage, LogError, Settings.SessionId.Value);
             }
             else
             {
-                LogMessage($"📍 EXISTING LISTENER: {config.SearchId.Value} (Running: {existingListener.IsRunning}, Connecting: {existingListener.IsConnecting})");
+                LogDebug($"📍 EXISTING LISTENER: {config.SearchId.Value} (Running: {existingListener.IsRunning}, Connecting: {existingListener.IsConnecting})");
             }
         }
     }
@@ -731,12 +806,35 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private void ForceStopAll()
     {
         LogMessage("🚨 FORCE STOPPING: All listeners due to plugin disable...");
-        foreach (var listener in _listeners.ToList())
+        
+        // Create a copy of the list to avoid modification during iteration
+        var listenersToStop = _listeners.ToList();
+        
+        foreach (var listener in listenersToStop)
         {
-            listener.Stop();
-            _listeners.Remove(listener);
+            try
+            {
+                LogMessage($"🛑 STOPPING: Search {listener.Config.SearchId.Value}");
+                listener.Stop();
+            }
+            catch (Exception ex)
+            {
+                LogError($"❌ Error stopping listener {listener.Config.SearchId.Value}: {ex.Message}");
+            }
         }
-        _recentItems.Clear();
+        
+        // Clear the listeners list
+        _listeners.Clear();
+        
+        // Clear recent items
+        lock (_recentItemsLock)
+        {
+            _recentItems.Clear();
+        }
+        
+        // Reset global connection attempts
+        _globalConnectionAttempts = 0;
+        
         LogMessage("✅ All listeners force stopped - plugin fully disabled.");
     }
 
