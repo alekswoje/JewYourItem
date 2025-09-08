@@ -81,7 +81,7 @@ public class Item
     [JsonProperty("desecrated")] public bool Desecrated { get; set; }
     [JsonProperty("frameType")] public int FrameType { get; set; }
     [JsonProperty("socketedItems")] public List<SocketedItem> SocketedItems { get; set; }
-    [JsonProperty("extended")] public Extended Extended { get; set; }
+    [JsonProperty("extended")] public object Extended { get; set; }
 }
 
 public class Socket

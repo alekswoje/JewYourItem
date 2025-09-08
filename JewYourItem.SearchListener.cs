@@ -450,8 +450,20 @@ public partial class JewYourItem
                                     if (response.IsSuccessStatusCode)
                                     {
                                         string content = await response.Content.ReadAsStringAsync();
-                                        var itemResponse = JsonConvert.DeserializeObject<ItemFetchResponse>(content);
-                                        if (itemResponse.Result != null && itemResponse.Result.Any())
+                                        ItemFetchResponse itemResponse = null;
+                                        
+                                        try
+                                        {
+                                            itemResponse = JsonConvert.DeserializeObject<ItemFetchResponse>(content);
+                                        }
+                                        catch (JsonException ex)
+                                        {
+                                            logError($"JSON parsing failed: {ex.Message}");
+                                            logError($"Response content: {content}");
+                                            continue; // Skip this batch and try the next one
+                                        }
+                                        
+                                        if (itemResponse?.Result != null && itemResponse.Result.Any())
                                         {
                                             logMessage($"✅ BATCH SUCCESS: Received {itemResponse.Result.Length} items from batch");
                                             foreach (var item in itemResponse.Result)

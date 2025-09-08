@@ -120,6 +120,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private bool _areaChangeCooldownLogged = false;
     private (int x, int y)? _teleportedItemLocation = null;
     private bool _isManualTeleport = false;
+    private RecentItem _currentTeleportingItem = null;
     
     // Note: Removed TP lock system - now using loading screen check instead
     
@@ -466,10 +467,9 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         bool currentStopAllState = Input.GetKeyState(Settings.StopAllHotkey.Value);
         if (currentStopAllState && !_lastStopAllState)
         {
-            LogMessage($"🛑 STOP ALL HOTKEY PRESSED: {Settings.StopAllHotkey.Value} - force stopping all searches and disabling plugin");
+            LogMessage($"🛑 STOP ALL HOTKEY PRESSED: {Settings.StopAllHotkey.Value} - force stopping all searches");
             ForceStopAll();
-            Settings.Enable.Value = false; // Disable the plugin
-            LogMessage("🔌 PLUGIN DISABLED: Stop All hotkey pressed");
+            LogMessage("🛑 ALL SEARCHES STOPPED: Stop All hotkey pressed");
         }
         _lastStopAllState = currentStopAllState;
 
@@ -777,26 +777,32 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     private void StopAll()
     {
+        LogMessage($"🛑 STOPPING ALL: {_listeners.Count} listeners");
         foreach (var listener in _listeners)
         {
+            LogMessage($"🛑 STOPPING: Search {listener.Config.SearchId.Value}");
             listener.Stop();
         }
         _listeners.Clear();
+        LogMessage("✅ ALL LISTENERS STOPPED");
     }
 
     private void ForceStopAll()
     {
-        LogMessage("🚨 FORCE STOPPING: All listeners due to plugin disable...");
+        LogMessage("🚨 FORCE STOPPING: All listeners...");
+        LogMessage($"📊 Current listener count: {_listeners.Count}");
         
         // Create a copy of the list to avoid modification during iteration
         var listenersToStop = _listeners.ToList();
+        LogMessage($"📋 Listeners to stop: {listenersToStop.Count}");
         
         foreach (var listener in listenersToStop)
         {
             try
             {
-                LogMessage($"🛑 STOPPING: Search {listener.Config.SearchId.Value}");
+                LogMessage($"🛑 STOPPING: Search {listener.Config.SearchId.Value} (Running: {listener.IsRunning}, Connecting: {listener.IsConnecting})");
                 listener.Stop();
+                LogMessage($"✅ STOPPED: Search {listener.Config.SearchId.Value}");
             }
             catch (Exception ex)
             {

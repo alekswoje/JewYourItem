@@ -43,7 +43,16 @@ public partial class JewYourItem
         ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.1f, 0.1f, 0.1f, 0.8f));
         ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.9f, 0.9f, 0.9f, 1.0f));
 
-        // Note: Removed TP lock display - now using loading screen check instead
+        // Show current teleporting item if we're in the process of teleporting
+        if (_currentTeleportingItem != null)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1.0f, 0.8f, 0.0f, 1.0f)); // Orange color
+            ImGui.Text("🚀 Teleporting to:");
+            ImGui.SameLine();
+            ImGui.Text($"{_currentTeleportingItem.Name} - {_currentTeleportingItem.Price}");
+            ImGui.PopStyleColor();
+            ImGui.Spacing();
+        }
 
         // Use child windows and proper spacing for better auto-sizing
         if (_listeners.Count > 0)
@@ -417,6 +426,17 @@ public partial class JewYourItem
             }
             ImGui.PopStyleColor(1);
             ImGui.Separator();
+        }
+        
+        // Stop All button
+        if (ImGui.Button("🛑 Stop All Searches"))
+        {
+            LogMessage("🛑 STOP ALL BUTTON PRESSED: Force stopping all searches");
+            ForceStopAll();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Stop all active search listeners");
         }
         
         if (ImGui.Button("Show Rate Limit Status"))

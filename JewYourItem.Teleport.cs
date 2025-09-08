@@ -95,6 +95,7 @@ public partial class JewYourItem
         {
             LogDebug("Teleport skipped: Not in hideout zone.");
             _isManualTeleport = false; // Reset flag on early return
+            _currentTeleportingItem = null; // Clear current teleporting item
             return;
         }
 
@@ -103,6 +104,7 @@ public partial class JewYourItem
         {
             LogDebug("⏳ LOADING SCREEN: Game is loading, skipping teleport for safety");
             _isManualTeleport = false; // Reset flag on early return
+            _currentTeleportingItem = null; // Clear current teleporting item
             return;
         }
         
@@ -111,6 +113,7 @@ public partial class JewYourItem
         {
             LogDebug("🚫 NOT IN GAME: Not in valid game state for teleporting");
             _isManualTeleport = false; // Reset flag on early return
+            _currentTeleportingItem = null; // Clear current teleporting item
             return;
         }
 
@@ -125,6 +128,7 @@ public partial class JewYourItem
             {
                 LogDebug("No recent items available for travel");
                 _isManualTeleport = false; // Reset flag on early return
+                _currentTeleportingItem = null; // Clear current teleporting item
                 return;
             }
 
@@ -152,6 +156,7 @@ public partial class JewYourItem
                     {
                         LogWarning("⚠️ RACE CONDITION: Queue became empty before dequeue attempt");
                         _isManualTeleport = false;
+                        _currentTeleportingItem = null; // Clear current teleporting item
                         return;
                     }
                     
@@ -172,6 +177,7 @@ public partial class JewYourItem
                 {
                     LogDebug("No valid items remaining for teleport");
                     _isManualTeleport = false;
+                    _currentTeleportingItem = null; // Clear current teleporting item
                     return;
                 }
             }
@@ -179,6 +185,9 @@ public partial class JewYourItem
         
         LogDebug($"Attempting to travel to hideout for item: {currentItem.Name} - {currentItem.Price}");
         LogDebug($"Hideout token: {currentItem.HideoutToken}");
+        
+        // Set the current teleporting item for GUI display
+        _currentTeleportingItem = currentItem;
         var request = new HttpRequestMessage(HttpMethod.Post, "https://www.pathofexile.com/api/trade2/whisper")
         {
             Content = new StringContent($"{{ \"token\": \"{currentItem.HideoutToken}\", \"continue\": true }}", Encoding.UTF8, "application/json")
@@ -284,6 +293,7 @@ public partial class JewYourItem
                         {
                             LogMessage("⚠️ RACE CONDITION: Queue became empty before dequeue");
                             _isManualTeleport = false; // Reset flag
+                            _currentTeleportingItem = null; // Clear current teleporting item
                             return;
                         }
                         
@@ -304,6 +314,7 @@ public partial class JewYourItem
                     {
                         LogMessage("📭 NO MORE ITEMS: All items in queue have expired");
                         _isManualTeleport = false; // Reset flag when no more items
+                        _currentTeleportingItem = null; // Clear current teleporting item
                     }
                 }
             }
@@ -376,6 +387,7 @@ public partial class JewYourItem
                     {
                         LogMessage("📭 NO MORE ITEMS: All items in queue have failed");
                         _isManualTeleport = false;
+                        _currentTeleportingItem = null; // Clear current teleporting item
                     }
                 }
                 
@@ -401,6 +413,7 @@ public partial class JewYourItem
                 }
                 _lastTpTime = DateTime.Now;
                 _isManualTeleport = false; // Reset flag
+                _currentTeleportingItem = null; // Clear current teleporting item
             }
         }
         catch (Exception ex)
@@ -411,6 +424,7 @@ public partial class JewYourItem
             // Note: No TP lock to unlock - using loading screen check instead
             
             _isManualTeleport = false; // Reset flag on exception
+            _currentTeleportingItem = null; // Clear current teleporting item on exception
         }
     }
 
