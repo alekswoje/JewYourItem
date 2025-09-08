@@ -38,7 +38,7 @@ public class JewYourItemSettings : ISettings
     public RangeNode<int> TpCooldown { get; set; } = new RangeNode<int>(10, 1, 30);
     [Menu("Move Mouse to Item", "Move mouse cursor to highlighted items")]
     [IgnoreMenu]
-    public ToggleNode MoveMouseToItem { get; set; } = new ToggleNode(false);
+    public ToggleNode MoveMouseToItem { get; set; } = new ToggleNode(true);
     [Menu("Auto Buy", "Automatically Ctrl+Left Click after moving mouse to item")]
     [IgnoreMenu]
     public ToggleNode AutoBuy { get; set; } = new ToggleNode(false);

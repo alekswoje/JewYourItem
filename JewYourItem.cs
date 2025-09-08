@@ -541,11 +541,14 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private bool _lastPurchaseWindowVisible = false;
     private static int _globalConnectionAttempts = 0;
     private static DateTime _pluginStartTime = DateTime.Now;
+    private static DateTime _lastGlobalReset = DateTime.Now;
     private static bool _emergencyShutdown = false;
     private DateTime _lastTickProcessTime = DateTime.MinValue;
     private DateTime _lastAreaChangeTime = DateTime.MinValue;
     private DateTime _lastSettingsChangeTime = DateTime.MinValue;
     private bool _areaChangeCooldownLogged = false;
+    private (int x, int y)? _teleportedItemLocation = null;
+    private bool _isManualTeleport = false;
 
     public override bool Initialise()
     {
@@ -724,11 +727,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             }
             try
             {
-                // Check rate limits before connecting WebSocket
-                if (_parent._rateLimiter != null)
-                {
-                    await _parent._rateLimiter.CheckAndWaitIfNeeded("client");
-                }
+                // REMOVED: Rate limiting for WebSocket connections to make startup instant
                 
                 // Dispose any existing WebSocket
                 if (WebSocket != null)
@@ -954,9 +953,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                         // Process each batch separately
                         foreach (var batch in itemBatches)
                         {
-                            // Check rate limits before each batch request
-                            await _parent._rateLimiter.CheckAndWaitIfNeeded("account");
-
+                            // REMOVED: Rate limiting for batch requests to make auto TP instant
                             string ids = string.Join(",", batch);
                             string fetchUrl = $"https://www.pathofexile.com/api/trade2/fetch/{ids}?query={Config.SearchId.Value}&realm=poe2";
                             
@@ -1081,10 +1078,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                                     logMessage($"Auto TP skipped: Cooldown of {_parent.Settings.TpCooldown.Value} seconds not met.");
                                                 }
                                             }
-                                            if (_parent.Settings.MoveMouseToItem.Value && _parent.GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
-                                            {
-                                                MoveMouseToItemLocation(x, y, logMessage);
-                                            }
+                                            // REMOVED: Mouse movement should only happen after manual teleports, not when auto TP is blocked by cooldown
                                         }
                                     }
                                     else
@@ -1273,7 +1267,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         }
     }
 
-    private async void TravelToHideout()
+    private async void TravelToHideout(bool isManual = false)
     {
         // CRITICAL: Respect plugin enable state
         if (!Settings.Enable.Value)
@@ -1281,16 +1275,29 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             LogMessage("🛑 Teleport blocked: Plugin is disabled");
             return;
         }
+        
+        // Set manual teleport flag
+        _isManualTeleport = isManual;
+        if (isManual)
+        {
+            LogMessage("🎯 MANUAL TELEPORT: User initiated teleport via hotkey");
+        }
+        else
+        {
+            LogMessage("🤖 AUTO TELEPORT: Auto teleport triggered by new item");
+        }
 
         if (!this.GameController.Area.CurrentArea.IsHideout)
         {
             LogMessage("Teleport skipped: Not in hideout zone.");
+            _isManualTeleport = false; // Reset flag on early return
             return;
         }
 
         if ((DateTime.Now - _lastTpTime).TotalSeconds < Settings.TpCooldown.Value)
         {
             LogMessage($"Teleport skipped: Cooldown of {Settings.TpCooldown.Value} seconds not met.");
+            _isManualTeleport = false; // Reset flag on early return
             return;
         }
 
@@ -1300,6 +1307,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         if (_recentItems.Count == 0) 
         {
             LogMessage("No recent items available for travel");
+            _isManualTeleport = false; // Reset flag on early return
             return;
         }
 
@@ -1346,9 +1354,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 _rateLimiter = new ConservativeRateLimiter(LogMessage, LogError);
             }
             
-            // Check rate limits before making request
-            await _rateLimiter.CheckAndWaitIfNeeded("account");
-            
+            // REMOVED: Rate limiting for teleport requests to make auto TP instant
             LogMessage("Sending teleport request...");
             var response = _httpClient.SendAsync(request).Result;
             LogMessage($"Response status: {response.StatusCode}");
@@ -1374,36 +1380,67 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     response.StatusCode == System.Net.HttpStatusCode.BadRequest)
                 {
                     LogMessage($"🗑️ ITEM EXPIRED: Removing expired item '{name}' and trying next...");
-                    _recentItems.Dequeue();
+                    
+                    // Double-check queue isn't empty before dequeue (race condition protection)
+                    if (_recentItems.Count > 0)
+                    {
+                        _recentItems.Dequeue();
+                    }
+                    else
+                    {
+                        LogMessage("⚠️ RACE CONDITION: Queue became empty before dequeue");
+                        _isManualTeleport = false; // Reset flag
+                        return;
+                    }
                     
                     // Try the next item if available
                     if (_recentItems.Count > 0)
                     {
                         LogMessage($"🔄 RETRY: Attempting teleport to next item ({_recentItems.Count} remaining)");
                         await Task.Delay(500); // Small delay before retry
-                        TravelToHideout(); // Recursive call to try next item
+                        TravelToHideout(_isManualTeleport); // Recursive call to try next item, preserve manual flag
                     }
                     else
                     {
                         LogMessage("📭 NO MORE ITEMS: All items in queue have expired");
+                        _isManualTeleport = false; // Reset flag when no more items
                     }
                 }
             }
             else
             {
                 LogMessage("Teleport to hideout successful!");
-                _recentItems.Clear();
-                _lastTpTime = DateTime.Now;
+                
+                // Store location for BOTH manual and auto teleports to enable mouse movement
+                _teleportedItemLocation = (x, y);
+                if (_isManualTeleport)
+                {
+                    LogMessage($"📍 STORED TELEPORT LOCATION: Manual teleport to item at ({x}, {y}) for mouse movement");
+                }
+                else
+                {
+                    LogMessage($"📍 STORED TELEPORT LOCATION: Auto teleport to item at ({x}, {y}) for mouse movement");
+                }
+                
+                // Move mouse immediately if purchase window is already open
                 if (Settings.MoveMouseToItem.Value && GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
                 {
+                    string tpType = _isManualTeleport ? "manually" : "auto";
+                    LogMessage($"🖱️ IMMEDIATE MOUSE MOVE: Purchase window already open, moving to {tpType} teleported item");
                     MoveMouseToItemLocation(x, y);
+                    _teleportedItemLocation = null; // Clear after use
                 }
+                
+                _recentItems.Clear();
+                _lastTpTime = DateTime.Now;
+                _isManualTeleport = false; // Reset flag
             }
         }
         catch (Exception ex)
         {
             LogError($"Teleport request failed: {ex.Message}");
             LogError($"Exception details: {ex}");
+            _isManualTeleport = false; // Reset flag on exception
         }
     }
 
@@ -1528,7 +1565,8 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         // Live searches should persist across zone changes
         // Only clear recent items as they're location-specific
         _recentItems.Clear();
-        LogMessage("📦 Cleared recent items due to area change");
+        // DON'T clear _teleportedItemLocation - we need it to persist until purchase window opens
+        LogMessage("📦 Cleared recent items due to area change (preserved teleported location for mouse movement)");
     }
 
     public async Task PlaySoundWithNAudio(string soundPath, Action<string> logMessage, Action<string> logError)
@@ -1621,17 +1659,30 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 if (hotkeyState && !_lastHotkeyState)
                 {
                     LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
-                    TravelToHideout();
+                    TravelToHideout(isManual: true);
                 }
                 _lastHotkeyState = hotkeyState;
 
-                // Check if purchase window just became visible and move mouse to recent item
+                // Check if purchase window just became visible and move mouse to teleported item
                 bool purchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
-                if (purchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _recentItems.Count > 0)
+                if (purchaseWindowVisible && !_lastPurchaseWindowVisible)
                 {
-                    LogMessage("Purchase window opened - moving mouse to most recent item");
-                    var (name, price, hideoutToken, x, y) = _recentItems.Peek();
-                    MoveMouseToItemLocation(x, y);
+                    LogMessage($"🖱️ PURCHASE WINDOW OPENED (Throttled): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}");
+                }
+                if (purchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
+                {
+                    if (_teleportedItemLocation.HasValue)
+                    {
+                        LogMessage($"🖱️ TELEPORT MOUSE MOVE: Purchase window opened, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                        MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                        _teleportedItemLocation = null; // Clear after use
+                    }
+                    else if (_recentItems.Count > 0)
+                    {
+                        LogMessage("🖱️ FALLBACK MOUSE MOVE: No teleported location, using most recent item");
+                        var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                        MoveMouseToItemLocation(x, y);
+                    }
                 }
                 _lastPurchaseWindowVisible = purchaseWindowVisible;
             }
@@ -1656,16 +1707,29 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 if (areaChangeHotkeyState && !_lastHotkeyState)
                 {
                     LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
-                    TravelToHideout();
+                    TravelToHideout(isManual: true);
                 }
                 _lastHotkeyState = areaChangeHotkeyState;
 
                 bool areaChangePurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
-                if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _recentItems.Count > 0)
+                if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible)
                 {
-                    LogMessage("Purchase window opened - moving mouse to most recent item");
-                    var (name, price, hideoutToken, x, y) = _recentItems.Peek();
-                    MoveMouseToItemLocation(x, y);
+                    LogMessage($"🖱️ PURCHASE WINDOW OPENED (Area): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}");
+                }
+                if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
+                {
+                    if (_teleportedItemLocation.HasValue)
+                    {
+                        LogMessage($"🖱️ TELEPORT MOUSE MOVE (Area): Purchase window opened, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                        MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                        _teleportedItemLocation = null; // Clear after use
+                    }
+                    else if (_recentItems.Count > 0)
+                    {
+                        LogMessage("🖱️ FALLBACK MOUSE MOVE (Area): No teleported location, using most recent item");
+                        var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                        MoveMouseToItemLocation(x, y);
+                    }
                 }
                 _lastPurchaseWindowVisible = areaChangePurchaseWindowVisible;
             }
@@ -1678,6 +1742,15 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         }
 
         _lastTickProcessTime = DateTime.Now;
+        
+        // Periodic reset of global connection attempts (every 5 minutes)
+        if ((DateTime.Now - _lastGlobalReset).TotalMinutes >= 5 && JewYourItem._globalConnectionAttempts > 0)
+        {
+            LogMessage($"🔄 PERIODIC RESET: Clearing global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) after 5 minutes");
+            JewYourItem._globalConnectionAttempts = 0;
+            _lastGlobalReset = DateTime.Now;
+        }
+        
         if (recentSettingsChange)
         {
             LogMessage("🔄 TICK: Processing listener management (INSTANT - settings changed)...");
@@ -1690,18 +1763,31 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         bool currentHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
         if (currentHotkeyState && !_lastHotkeyState)
         {
-            LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
-            TravelToHideout();
+            LogMessage($"🎮 MANUAL HOTKEY PRESSED: {Settings.TravelHotkey.Value} - initiating manual teleport");
+            TravelToHideout(isManual: true);
         }
         _lastHotkeyState = currentHotkeyState;
 
-        // Check if purchase window just became visible and move mouse to recent item
+        // Check if purchase window just became visible and move mouse to teleported item
         bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
-        if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _recentItems.Count > 0)
+        if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible)
         {
-            LogMessage("Purchase window opened - moving mouse to most recent item");
-            var (name, price, hideoutToken, x, y) = _recentItems.Peek();
-            MoveMouseToItemLocation(x, y);
+            LogMessage($"🖱️ PURCHASE WINDOW OPENED: MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}");
+        }
+        if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
+        {
+            if (_teleportedItemLocation.HasValue)
+            {
+                LogMessage($"🖱️ TELEPORT MOUSE MOVE (Main): Purchase window opened, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                _teleportedItemLocation = null; // Clear after use
+            }
+            else if (_recentItems.Count > 0)
+            {
+                LogMessage("🖱️ FALLBACK MOUSE MOVE (Main): No teleported location, using most recent item");
+                var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                MoveMouseToItemLocation(x, y);
+            }
         }
         _lastPurchaseWindowVisible = currentPurchaseWindowVisible;
 
@@ -1729,6 +1815,13 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             _lastActiveConfigsHash = currentConfigsHash;
             _lastSettingsChangeTime = DateTime.Now;
             LogMessage($"🔄 SETTINGS CHANGED: Config changed from {_listeners.Count} to {allConfigs.Count} searches - processing immediately");
+            
+            // Reset global attempts for user actions to allow fresh start
+            if (JewYourItem._globalConnectionAttempts > 0)
+            {
+                LogMessage($"🔄 SETTINGS RESET: Clearing global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) for fresh start");
+                JewYourItem._globalConnectionAttempts = 0;
+            }
             
             // IMMEDIATE CLEANUP: Remove duplicates and disabled listeners first
             var currentListenerIds = _listeners.Select(l => $"{l.Config.League.Value}|{l.Config.SearchId.Value}").ToList();
@@ -1821,11 +1914,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     continue;
                 }
 
-                // Check rate limits before restarting WebSocket
-                if (_rateLimiter != null)
-                {
-                    await _rateLimiter.CheckAndWaitIfNeeded("client");
-                }
+                // REMOVED: Rate limiting for WebSocket restarts to make reconnection instant
                 
                 LogMessage($"🔄 ATTEMPTING RESTART: Search {listener.Config.SearchId.Value}");
                 listener.Start(LogMessage, LogError, Settings.SessionId.Value);
@@ -1882,14 +1971,18 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     JewYourItem._globalConnectionAttempts = 0;
                 }
                 
-                // Check rate limits before creating new WebSocket (but allow immediate user actions)
-                if (_rateLimiter != null && !recentSettingsChange)
+                // REMOVED: All rate limiting for listener creation to make startup instant
+                LogMessage($"⚡ INSTANT START: No rate limiting for maximum speed");
+                
+                // FINAL SAFETY CHECK: Ensure no duplicate was created during processing
+                var lastMinuteCheck = _listeners.Any(l => 
+                    l.Config.League.Value == config.League.Value && 
+                    l.Config.SearchId.Value == config.SearchId.Value);
+                
+                if (lastMinuteCheck)
                 {
-                    await _rateLimiter.CheckAndWaitIfNeeded("client");
-                }
-                else if (recentSettingsChange)
-                {
-                    LogMessage($"⚡ INSTANT START: Bypassing rate limit for user-initiated settings change");
+                    LogMessage($"🛡️ LAST MINUTE PREVENTION: Duplicate detected right before creation for {config.SearchId.Value}");
+                    continue;
                 }
                 
                 var newListener = new SearchListener(this, config, LogMessage, LogError);
