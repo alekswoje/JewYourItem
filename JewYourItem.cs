@@ -624,7 +624,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     LogDebug($"🚨 EMERGENCY: Preventing new listener creation - global limit reached ({JewYourItem._globalConnectionAttempts}/{creationLimit} attempts)");
                     continue;
                 }
-                else if (recentSettingsChange && JewYourItem._globalConnectionAttempts >= (isInitialStartup ? 20 : 2))
+                else if (recentSettingsChange && JewYourItem._globalConnectionAttempts >= (isInitialStartup ? 20 : 5))
                 {
                     // Reset global attempts for user-initiated changes
                     LogDebug($"🔄 USER ACTION: Resetting global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) for settings change");

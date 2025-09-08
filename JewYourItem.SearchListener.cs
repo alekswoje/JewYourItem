@@ -130,8 +130,8 @@ public partial class JewYourItem
                 bool isFirstConnectionAttempt = ConnectionAttempts <= 1;
                 
                 // During startup: Allow up to 25 total attempts (for 20+ listeners + some retries)
-                // After startup: Allow only 3 attempts (for retry protection)
-                int globalLimit = isInitialStartup ? 25 : 3;
+                // After startup: Allow 10 attempts (for up to 10 searches + some retries)
+                int globalLimit = isInitialStartup ? 25 : 10;
                 
                 if (JewYourItem._globalConnectionAttempts > globalLimit)
                 {
