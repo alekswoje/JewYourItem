@@ -244,14 +244,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             return;
         }
 
-        // EMERGENCY SHUTDOWN CHECK
-        if (JewYourItem._emergencyShutdown)
-        {
-            LogError("🚨🚨🚨 EMERGENCY SHUTDOWN ACTIVE - Plugin disabled due to connection spam protection");
-            Settings.Enable.Value = false;
-            ForceStopAll();
-            return;
-        }
+        // REMOVED: Emergency shutdown check - no longer needed since system is stable
 
         // Note: Removed TP lock timeout check - now using loading screen check instead
 
@@ -463,12 +456,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 JewYourItem._globalConnectionAttempts = 0;
             }
             
-            // Reset emergency shutdown on settings change (user is actively configuring)
-            if (JewYourItem._emergencyShutdown)
-            {
-                LogMessage($"🔄 EMERGENCY RESET: Settings changed - clearing emergency shutdown state");
-                JewYourItem._emergencyShutdown = false;
-            }
+            // REMOVED: Emergency shutdown reset - no longer needed
             
             // IMMEDIATE CLEANUP: Remove duplicates and disabled listeners first
             var currentListenerIds = _listeners.Select(l => $"{l.Config.League.Value}|{l.Config.SearchId.Value}").ToList();
@@ -614,22 +602,8 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     continue;
                 }
                 
-                // EMERGENCY: Prevent rapid creation (but allow user-initiated restarts and startup)
-                var timeSinceStart = DateTime.Now - _pluginStartTime;
-                bool isInitialStartup = timeSinceStart.TotalMinutes < 2;
-                int creationLimit = isInitialStartup ? 20 : 5; // Allow many during startup, few during runtime
-                
-                if (JewYourItem._globalConnectionAttempts >= creationLimit && !recentSettingsChange)
-                {
-                    LogDebug($"🚨 EMERGENCY: Preventing new listener creation - global limit reached ({JewYourItem._globalConnectionAttempts}/{creationLimit} attempts)");
-                    continue;
-                }
-                else if (recentSettingsChange && JewYourItem._globalConnectionAttempts >= (isInitialStartup ? 20 : 5))
-                {
-                    // Reset global attempts for user-initiated changes
-                    LogDebug($"🔄 USER ACTION: Resetting global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) for settings change");
-                    JewYourItem._globalConnectionAttempts = 0;
-                }
+                // REMOVED: Emergency shutdown logic - no longer needed since system is stable
+                // The 20-search limit above provides sufficient protection
                 
                 // REMOVED: All rate limiting for listener creation to make startup instant
                 LogDebug($"⚡ INSTANT START: No rate limiting for maximum speed");

@@ -121,31 +121,8 @@ public partial class JewYourItem
                     ConnectionAttempts = Math.Min(ConnectionAttempts, 5); // Partial reset, keep some penalty
                 }
 
-                // EMERGENCY: Check global limits (allow more attempts during startup)
-                JewYourItem._globalConnectionAttempts++;
-                
-                // Calculate time since plugin start to allow generous startup period
-                var timeSinceStart = DateTime.Now - JewYourItem._pluginStartTime;
-                bool isInitialStartup = timeSinceStart.TotalMinutes < 2; // 2 minute startup grace period
-                bool isFirstConnectionAttempt = ConnectionAttempts <= 1;
-                
-                // During startup: Allow up to 25 total attempts (for 20+ listeners + some retries)
-                // After startup: Allow 10 attempts (for up to 10 searches + some retries)
-                int globalLimit = isInitialStartup ? 25 : 10;
-                
-                if (JewYourItem._globalConnectionAttempts > globalLimit)
-                {
-                    if (isInitialStartup)
-                    {
-                        _logMessage($"🚨🚨🚨 STARTUP EMERGENCY SHUTDOWN: Too many startup attempts ({JewYourItem._globalConnectionAttempts}/{globalLimit})");
-                    }
-                    else
-                    {
-                        _logMessage($"🚨🚨🚨 GLOBAL EMERGENCY SHUTDOWN: Too many retry attempts ({JewYourItem._globalConnectionAttempts}/{globalLimit})");
-                    }
-                    JewYourItem._emergencyShutdown = true;
-                    return;
-                }
+                // REMOVED: Emergency shutdown logic - no longer needed since system is stable
+                // The 20-search limit in the main Tick method provides sufficient protection
 
                 // Set connection state flags
                 IsConnecting = true;
