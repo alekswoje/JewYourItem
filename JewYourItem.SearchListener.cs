@@ -101,9 +101,8 @@ public partial class JewYourItem
                     ConnectionAttempts = Math.Min(ConnectionAttempts, 5); // Partial reset, keep some penalty
                 }
 
-                // EMERGENCY: Check global limits
-                JewYourItem._globalConnectionAttempts++;
-                if (JewYourItem._globalConnectionAttempts > 3)
+                // EMERGENCY: Check global limits before incrementing
+                if (JewYourItem._globalConnectionAttempts >= 3)
                 {
                     _logMessage($"🚨🚨🚨 GLOBAL EMERGENCY SHUTDOWN: Too many connection attempts ({JewYourItem._globalConnectionAttempts})");
                     JewYourItem._emergencyShutdown = true;
@@ -115,7 +114,7 @@ public partial class JewYourItem
                 LastConnectionAttempt = DateTime.Now;
                 ConnectionAttempts++;
                 
-                _logMessage($"🔌 STARTING CONNECTION: Search {Config.SearchId.Value} (Attempt #{ConnectionAttempts}, Global: {JewYourItem._globalConnectionAttempts})");
+                _logMessage($"🔌 STARTING CONNECTION: Search {Config.SearchId.Value} (Attempt #{ConnectionAttempts}, Will be Global: {JewYourItem._globalConnectionAttempts + 1})");
             }
             try
             {
@@ -147,6 +146,9 @@ public partial class JewYourItem
                 
                 _logMessage($"🔌 CONNECTING: {Config.SearchId.Value} to {url}");
                 await WebSocket.ConnectAsync(new Uri(url), Cts.Token);
+
+                // Only increment global counter AFTER successful connection
+                JewYourItem._globalConnectionAttempts++;
 
                 lock (_connectionLock)
                 {

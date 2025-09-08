@@ -543,6 +543,13 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 JewYourItem._globalConnectionAttempts = 0;
             }
             
+            // Reset emergency shutdown on settings change (user is actively configuring)
+            if (JewYourItem._emergencyShutdown)
+            {
+                LogMessage($"🔄 EMERGENCY RESET: Settings changed - clearing emergency shutdown state");
+                JewYourItem._emergencyShutdown = false;
+            }
+            
             // IMMEDIATE CLEANUP: Remove duplicates and disabled listeners first
             var currentListenerIds = _listeners.Select(l => $"{l.Config.League.Value}|{l.Config.SearchId.Value}").ToList();
             LogMessage($"🔍 CURRENT LISTENERS: {string.Join(", ", currentListenerIds)}");
@@ -684,9 +691,9 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     LogMessage($"🚨 EMERGENCY: Preventing new listener creation - global limit reached ({JewYourItem._globalConnectionAttempts} attempts)");
                     continue;
                 }
-                else if (recentSettingsChange && JewYourItem._globalConnectionAttempts >= 2)
+                else if (recentSettingsChange && JewYourItem._globalConnectionAttempts >= 1)
                 {
-                    // Reset global attempts for user-initiated changes
+                    // Reset global attempts for user-initiated changes (more forgiving)
                     LogMessage($"🔄 USER ACTION: Resetting global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) for settings change");
                     JewYourItem._globalConnectionAttempts = 0;
                 }
