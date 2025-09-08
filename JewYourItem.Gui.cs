@@ -13,6 +13,12 @@ public partial class JewYourItem
 {
     public override void Render()
     {
+        // Debug logging to track when Render is called during loading
+        if (GameController.IsLoading)
+        {
+            LogDebug("🖼️ RENDER: Called during loading screen");
+        }
+        
         // CRITICAL: Respect plugin enable state for ALL rendering
         if (!Settings.Enable.Value)
         {
@@ -230,7 +236,31 @@ public partial class JewYourItem
 
         if (Settings.ShowGui.Value)
         {
+            // Show basic status
             Graphics.DrawText($"JewYourItem: {_listeners.Count(l => l.IsRunning)} active", new Vector2(100, 100), Color.LightGreen);
+            
+            // Show current teleporting item during loading screens
+            if (_currentTeleportingItem != null)
+            {
+                Graphics.DrawText($"🚀 Teleporting to: {_currentTeleportingItem.Name} - {_currentTeleportingItem.Price}", new Vector2(100, 120), Color.Orange);
+            }
+            
+            // Show loading screen indicator and additional info
+            if (GameController.IsLoading)
+            {
+                Graphics.DrawText("⏳ Loading...", new Vector2(100, 140), Color.Yellow);
+                
+                // Show recent items count
+                int recentItemsCount;
+                lock (_recentItemsLock)
+                {
+                    recentItemsCount = _recentItems.Count;
+                }
+                if (recentItemsCount > 0)
+                {
+                    Graphics.DrawText($"📦 {recentItemsCount} items in queue", new Vector2(100, 160), Color.LightBlue);
+                }
+            }
         }
     }
 
