@@ -554,6 +554,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private static DateTime _pluginStartTime = DateTime.Now;
     private static DateTime _lastGlobalReset = DateTime.Now;
     private static bool _emergencyShutdown = false;
+    private static readonly Random _random = new Random();
     private DateTime _lastTickProcessTime = DateTime.MinValue;
     private DateTime _lastAreaChangeTime = DateTime.MinValue;
     private DateTime _lastSettingsChangeTime = DateTime.MinValue;
@@ -564,6 +565,10 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     // Dynamic TP cooldown state
     private bool _tpLocked = false;
     private DateTime _tpLockedTime = DateTime.MinValue;
+    
+    // Purchase window state tracking to prevent accidental purchases
+    private bool _allowMouseMovement = true;
+    private bool _windowWasClosedSinceLastMovement = true;
 
     public override bool Initialise()
     {
@@ -669,12 +674,12 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             lock (_connectionLock)
             {
                 // STRICT CONNECTION SAFETY CHECKS
-                if (string.IsNullOrEmpty(Config.League.Value) || string.IsNullOrEmpty(Config.SearchId.Value) || string.IsNullOrEmpty(sessionId))
-                {
-                    _logError("League, Search ID, or Session ID is empty for this search.");
-                    LastErrorTime = DateTime.Now;
-                    return;
-                }
+            if (string.IsNullOrEmpty(Config.League.Value) || string.IsNullOrEmpty(Config.SearchId.Value) || string.IsNullOrEmpty(sessionId))
+            {
+                _logError("League, Search ID, or Session ID is empty for this search.");
+                LastErrorTime = DateTime.Now;
+                return;
+            }
 
                 // Check if already running or connecting
                 if (IsRunning || IsConnecting)
@@ -691,11 +696,11 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 }
 
                 // Rate limit cooldown check
-                if ((DateTime.Now - LastErrorTime).TotalSeconds < JewYourItem.RestartCooldownSeconds)
-                {
+            if ((DateTime.Now - LastErrorTime).TotalSeconds < JewYourItem.RestartCooldownSeconds)
+            {
                     _logMessage($"🛡️ CONNECTION BLOCKED: Search {Config.SearchId.Value} in rate limit cooldown ({JewYourItem.RestartCooldownSeconds - (DateTime.Now - LastErrorTime).TotalSeconds:F1}s remaining)");
-                    return;
-                }
+                return;
+            }
 
                 // EMERGENCY: Connection attempt throttling (max 1 attempt per 30 seconds)
                 if ((DateTime.Now - LastConnectionAttempt).TotalSeconds < 30)
@@ -755,16 +760,16 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     WebSocket = null;
                 }
 
-                WebSocket = new ClientWebSocket();
-                var cookie = $"POESESSID={sessionId}";
-                WebSocket.Options.SetRequestHeader("Cookie", cookie);
-                WebSocket.Options.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
-                WebSocket.Options.SetRequestHeader("Origin", "https://www.pathofexile.com");
-                WebSocket.Options.SetRequestHeader("Accept-Encoding", "gzip, deflate, br, zstd");
-                WebSocket.Options.SetRequestHeader("Accept-Language", "en-US,en;q=0.9");
-                WebSocket.Options.SetRequestHeader("Pragma", "no-cache");
-                WebSocket.Options.SetRequestHeader("Cache-Control", "no-cache");
-                WebSocket.Options.SetRequestHeader("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits");
+            WebSocket = new ClientWebSocket();
+            var cookie = $"POESESSID={sessionId}";
+            WebSocket.Options.SetRequestHeader("Cookie", cookie);
+            WebSocket.Options.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
+            WebSocket.Options.SetRequestHeader("Origin", "https://www.pathofexile.com");
+            WebSocket.Options.SetRequestHeader("Accept-Encoding", "gzip, deflate, br, zstd");
+            WebSocket.Options.SetRequestHeader("Accept-Language", "en-US,en;q=0.9");
+            WebSocket.Options.SetRequestHeader("Pragma", "no-cache");
+            WebSocket.Options.SetRequestHeader("Cache-Control", "no-cache");
+            WebSocket.Options.SetRequestHeader("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits");
                 
                 string url = $"wss://www.pathofexile.com/api/trade2/live/poe2/{Uri.EscapeDataString(Config.League.Value)}/{Config.SearchId.Value}";
                 
@@ -786,7 +791,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 lock (_connectionLock)
                 {
                     IsConnecting = false;
-                    IsRunning = false;
+                IsRunning = false;
                 }
                 
                 _logError($"❌ CONNECTION FAILED: Search {Config.SearchId.Value}: {ex.Message}");
@@ -861,7 +866,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             
             lock (_connectionLock)
             {
-                IsRunning = false;
+            IsRunning = false;
                 IsConnecting = false;
             }
         }
@@ -974,8 +979,8 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                             
                             logMessage($"🔍 FETCHING batch of {batch.Length} items: {ids}");
 
-                            using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
-                            {
+                        using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
+                        {
                             var cookie = $"POESESSID={sessionId}";
                             request.Headers.Add("Cookie", cookie);
                             request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
@@ -1038,15 +1043,32 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                                 {
                                                     var assemblyLocation = System.Reflection.Assembly.GetExecutingAssembly().Location;
                                                     var assemblyDir = Path.GetDirectoryName(assemblyLocation);
+                                                    
+                                                    int randomNumber = _random.Next(1, 11); // 1 in 10 for testing
+                                                    bool playRareSound = randomNumber == 1;
+                                                    string soundFileName = playRareSound ? "pulserare.wav" : "pulse.wav";
+                                                    
+                                                    // Debug logging for rare sound testing
+                                                    logMessage($"🎲 SOUND DEBUG: Random={randomNumber}, PlayRare={playRareSound}, File={soundFileName}");
+                                                    
+                                                    if (playRareSound)
+                                                    {
+                                                        logMessage("🎉 WHAT ARE YOU DOING STEP BRO! 🎉 (1 in 10 chance for testing)");
+                                                    }
+                                                    
                                                     var possiblePaths = new[]
                                                     {
-                                                        Path.Combine(assemblyDir, "sound", "pulse.wav"),
-                                                        "sound/pulse.wav",
-                                                        Path.Combine(assemblyDir, "..", "sound", "pulse.wav"),
-                                                        Path.Combine(assemblyDir, "..", "..", "sound", "pulse.wav"),
-                                                        Path.Combine(assemblyDir, "..", "..", "..", "Source", "JewYourItem", "sound", "pulse.wav"),
-                                                        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sound", "pulse.wav"),
-                                                        Path.Combine(Directory.GetCurrentDirectory(), "sound", "pulse.wav")
+                                                        Path.Combine(assemblyDir, "sound", soundFileName),
+                                                        Path.Combine("sound", soundFileName),
+                                                        Path.Combine(assemblyDir, "..", "sound", soundFileName),
+                                                        Path.Combine(assemblyDir, "..", "..", "sound", soundFileName),
+                                                        Path.Combine(assemblyDir, "..", "..", "..", "Source", "JewYourItem", "sound", soundFileName),
+                                                        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sound", soundFileName),
+                                                        Path.Combine(Directory.GetCurrentDirectory(), "sound", soundFileName),
+                                                        // Additional paths for development/compilation scenarios
+                                                        Path.Combine(assemblyDir.Replace("Temp", "Source"), "sound", soundFileName),
+                                                        Path.Combine(assemblyDir, "..", "..", "Source", "JewYourItem", "sound", soundFileName),
+                                                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ExileCore2", "Plugins", "Source", "JewYourItem", "sound", soundFileName)
                                                     };
                                                     string soundPath = null;
                                                     foreach (var path in possiblePaths)
@@ -1059,7 +1081,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                                     }
                                                     if (soundPath != null)
                                                     {
-                                                        logMessage("Playing sound file...");
+                                                        logMessage($"Playing sound file: {soundFileName}...");
                                                         await _parent.PlaySoundWithNAudio(soundPath, logMessage, logError);
                                                         logMessage("Sound played successfully!");
                                                     }
@@ -1081,22 +1103,30 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                             }
                                             if (_parent.Settings.AutoTp.Value && _parent.GameController.Area.CurrentArea.IsHideout)
                                             {
-                                                if (!_parent._tpLocked)
-                                                {
-                                                    _parent.TravelToHideout();
-                                                    _parent._recentItems.Clear();
-                                                    _parent._lastTpTime = DateTime.Now;
-                                                    logMessage("Auto TP executed due to new search result.");
-                                                }
-                                                else
-                                                {
-                                                    double remainingTime = 10 - (DateTime.Now - _parent._tpLockedTime).TotalSeconds;
-                                                    logMessage($"Auto TP skipped: TP locked, waiting for window or timeout ({remainingTime:F1}s remaining)");
-                                                }
+                                            // Check if TP is locked and if timeout has expired
+                                            if (_parent._tpLocked && (DateTime.Now - _parent._tpLockedTime).TotalSeconds >= 10)
+                                            {
+                                                logMessage("🔓 TP UNLOCKED: 10-second timeout reached in SearchListener, unlocking TP");
+                                                _parent._tpLocked = false;
+                                                _parent._tpLockedTime = DateTime.MinValue;
+                                            }
+                                            
+                                            if (!_parent._tpLocked)
+                                            {
+                                                _parent.TravelToHideout();
+                                                _parent._recentItems.Clear();
+                                                _parent._lastTpTime = DateTime.Now;
+                                                logMessage("Auto TP executed due to new search result.");
+                                            }
+                                            else
+                                            {
+                                                double remainingTime = 10 - (DateTime.Now - _parent._tpLockedTime).TotalSeconds;
+                                                logMessage($"Auto TP skipped: TP locked, waiting for window or timeout ({Math.Max(0, remainingTime):F1}s remaining)");
+                                            }
                                             }
                                             // REMOVED: Mouse movement should only happen after manual teleports, not when auto TP is blocked by cooldown
+                                            }
                                         }
-                                    }
                                     else
                                     {
                                         logMessage($"⚠️ BATCH EMPTY: No items returned from batch");
@@ -1158,10 +1188,10 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 IsConnecting = false;
                 
                 if (Cts != null && !Cts.IsCancellationRequested)
+            {
+                try
                 {
-                    try
-                    {
-                        Cts.Cancel();
+                    Cts.Cancel();
                     }
                     catch { /* Ignore cancellation errors */ }
                 }
@@ -1175,19 +1205,19 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                         
                         if (webSocketToClose.State == WebSocketState.Open)
                         {
-                            // Use Task.Run to avoid blocking the main thread
-                            Task.Run(async () =>
-                            {
-                                try
-                                {
+                    // Use Task.Run to avoid blocking the main thread
+                    Task.Run(async () =>
+                    {
+                        try
+                        {
                                     await webSocketToClose.CloseAsync(WebSocketCloseStatus.NormalClosure, "Plugin stopped", CancellationToken.None);
-                                }
-                                catch (Exception ex)
-                                {
+                        }
+                        catch (Exception ex)
+                        {
                                     _logError($"Error closing WebSocket for {Config.SearchId.Value}: {ex.Message}");
-                                }
-                                finally
-                                {
+                        }
+                        finally
+                        {
                                     try
                                     {
                                         webSocketToClose.Dispose();
@@ -1204,9 +1234,9 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                             try
                             {
                                 webSocketToClose.Dispose();
-                            }
-                            catch (Exception ex)
-                            {
+                }
+                catch (Exception ex)
+                {
                                 _logError($"Error disposing WebSocket for {Config.SearchId.Value}: {ex.Message}");
                             }
                         }
@@ -1251,9 +1281,9 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 float cellHeight = rect.Height / 12.0f;
                 var topLeft = rect.TopLeft;
                 
-                // Calculate item position within the stash panel
-                int itemX = (int)(topLeft.X + (x * cellWidth) + (cellWidth / 2));
-                int itemY = (int)(topLeft.Y + (y * cellHeight) + (cellHeight / 2));
+                // Calculate item position within the stash panel (bottom-right to avoid sockets)
+                int itemX = (int)(topLeft.X + (x * cellWidth) + (cellWidth * 7 / 8));
+                int itemY = (int)(topLeft.Y + (y * cellHeight) + (cellHeight * 7 / 8));
                 
                 // Get game window position
                 var windowRect = _parent.GameController.Window.GetWindowRectangle();
@@ -1325,7 +1355,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 double remainingTime = 10 - (DateTime.Now - _tpLockedTime).TotalSeconds;
                 LogMessage($"🔒 TP LOCKED: Waiting for purchase window or timeout ({remainingTime:F1}s remaining)");
                 _isManualTeleport = false; // Reset flag on early return
-                return;
+            return;
             }
         }
 
@@ -1416,8 +1446,8 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     
                     // Double-check queue isn't empty before dequeue (race condition protection)
                     if (_recentItems.Count > 0)
-                    {
-                        _recentItems.Dequeue();
+                {
+                    _recentItems.Dequeue();
                     }
                     else
                     {
@@ -1573,9 +1603,9 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             float cellHeight = rect.Height / 12.0f;
             var topLeft = rect.TopLeft;
             
-            // Calculate item position within the stash panel
-            int itemX = (int)(topLeft.X + (x * cellWidth) + (cellWidth / 2));
-            int itemY = (int)(topLeft.Y + (y * cellHeight) + (cellHeight / 2));
+            // Calculate item position within the stash panel (bottom-right to avoid sockets)
+            int itemX = (int)(topLeft.X + (x * cellWidth) + (cellWidth * 7 / 8));
+            int itemY = (int)(topLeft.Y + (y * cellHeight) + (cellHeight * 7 / 8));
             
             // Get game window position
             var windowRect = GameController.Window.GetWindowRectangle();
@@ -1630,11 +1660,11 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             var rect = stashPanel.GetClientRectCache;
             if (rect.Width <= 0 || rect.Height <= 0) return;
 
-            // Calculate screen coordinates for the stash position
+            // Calculate screen coordinates for the stash position (bottom-right to avoid sockets)
             float cellWidth = rect.Width / 12f;
             float cellHeight = rect.Height / 12f;
-            int screenX = (int)(rect.Left + (stashX * cellWidth) + (cellWidth / 2));
-            int screenY = (int)(rect.Top + (stashY * cellHeight) + (cellHeight / 2));
+            int screenX = (int)(rect.Left + (stashX * cellWidth) + (cellWidth * 7 / 8));
+            int screenY = (int)(rect.Top + (stashY * cellHeight) + (cellHeight * 7 / 8));
 
             // Store the learned coordinates
             Settings.PurchaseWindowX.Value = screenX;
@@ -1755,6 +1785,14 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             return;
         }
 
+        // CRITICAL: Check TP lock timeout to prevent infinite locks
+        if (_tpLocked && (DateTime.Now - _tpLockedTime).TotalSeconds >= 10)
+        {
+            LogMessage("🔓 TP UNLOCKED: 10-second timeout reached in Tick(), unlocking TP");
+            _tpLocked = false;
+            _tpLockedTime = DateTime.MinValue;
+        }
+
         // Ensure rate limiter is initialized
         if (_rateLimiter == null)
         {
@@ -1790,9 +1828,18 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
                 // Check if purchase window just became visible and move mouse to teleported item
                 bool purchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
+                
+                // Track window close events (throttled)
+                if (!purchaseWindowVisible && _lastPurchaseWindowVisible)
+                {
+                    LogMessage("🚪 PURCHASE WINDOW CLOSED (Throttled): Mouse movement will be allowed on next window open");
+                    _windowWasClosedSinceLastMovement = true;
+                    _allowMouseMovement = true;
+                }
+                
                 if (purchaseWindowVisible && !_lastPurchaseWindowVisible)
                 {
-                    LogMessage($"🖱️ PURCHASE WINDOW OPENED (Throttled): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}");
+                    LogMessage($"🖱️ PURCHASE WINDOW OPENED (Throttled): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
                     
                     // Unlock TP when purchase window opens
                     if (_tpLocked)
@@ -1801,20 +1848,38 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                         _tpLocked = false;
                         _tpLockedTime = DateTime.MinValue;
                     }
+                    
+                    // Learn purchase window coordinates for future instant mouse movement
+                    if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
+                    {
+                        LogMessage($"🎓 LEARNING TRIGGER (Throttled): Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                        LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                    }
                 }
                 if (purchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
                 {
-                    if (_teleportedItemLocation.HasValue)
+                    if (_allowMouseMovement && _windowWasClosedSinceLastMovement)
                     {
-                        LogMessage($"🖱️ TELEPORT MOUSE MOVE: Purchase window opened, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
-                        MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
-                        _teleportedItemLocation = null; // Clear after use
+                        if (_teleportedItemLocation.HasValue)
+                        {
+                            LogMessage($"🖱️ SAFE MOUSE MOVE (Throttled): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                            MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                            _teleportedItemLocation = null; // Clear after use
+                            _allowMouseMovement = false; // Block further movement until window closes
+                            _windowWasClosedSinceLastMovement = false;
+                        }
+                        else if (_recentItems.Count > 0)
+                        {
+                            LogMessage("🖱️ SAFE FALLBACK MOVE (Throttled): Window was closed, using most recent item");
+                            var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                            MoveMouseToItemLocation(x, y);
+                            _allowMouseMovement = false; // Block further movement until window closes
+                            _windowWasClosedSinceLastMovement = false;
+                        }
                     }
-                    else if (_recentItems.Count > 0)
+                    else
                     {
-                        LogMessage("🖱️ FALLBACK MOUSE MOVE: No teleported location, using most recent item");
-                        var (name, price, hideoutToken, x, y) = _recentItems.Peek();
-                        MoveMouseToItemLocation(x, y);
+                        LogMessage("🚫 MOUSE MOVE BLOCKED (Throttled): Purchase window opened but previous window was not closed (preventing accidental purchases)");
                     }
                 }
                 _lastPurchaseWindowVisible = purchaseWindowVisible;
@@ -1845,9 +1910,18 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 _lastHotkeyState = areaChangeHotkeyState;
 
                 bool areaChangePurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
+                
+                // Track window close events (area change)
+                if (!areaChangePurchaseWindowVisible && _lastPurchaseWindowVisible)
+                {
+                    LogMessage("🚪 PURCHASE WINDOW CLOSED (Area): Mouse movement will be allowed on next window open");
+                    _windowWasClosedSinceLastMovement = true;
+                    _allowMouseMovement = true;
+                }
+                
                 if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible)
                 {
-                    LogMessage($"🖱️ PURCHASE WINDOW OPENED (Area): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}");
+                    LogMessage($"🖱️ PURCHASE WINDOW OPENED (Area): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
                     
                     // Unlock TP when purchase window opens
                     if (_tpLocked)
@@ -1856,20 +1930,38 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                         _tpLocked = false;
                         _tpLockedTime = DateTime.MinValue;
                     }
+                    
+                    // Learn purchase window coordinates for future instant mouse movement
+                    if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
+                    {
+                        LogMessage($"🎓 LEARNING TRIGGER (Area): Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                        LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                    }
                 }
                 if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
                 {
-                    if (_teleportedItemLocation.HasValue)
+                    if (_allowMouseMovement && _windowWasClosedSinceLastMovement)
                     {
-                        LogMessage($"🖱️ TELEPORT MOUSE MOVE (Area): Purchase window opened, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
-                        MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
-                        _teleportedItemLocation = null; // Clear after use
+                        if (_teleportedItemLocation.HasValue)
+                        {
+                            LogMessage($"🖱️ SAFE MOUSE MOVE (Area): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                            MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                            _teleportedItemLocation = null; // Clear after use
+                            _allowMouseMovement = false; // Block further movement until window closes
+                            _windowWasClosedSinceLastMovement = false;
+                        }
+                        else if (_recentItems.Count > 0)
+                        {
+                            LogMessage("🖱️ SAFE FALLBACK MOVE (Area): Window was closed, using most recent item");
+                            var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                            MoveMouseToItemLocation(x, y);
+                            _allowMouseMovement = false; // Block further movement until window closes
+                            _windowWasClosedSinceLastMovement = false;
+                        }
                     }
-                    else if (_recentItems.Count > 0)
+                    else
                     {
-                        LogMessage("🖱️ FALLBACK MOUSE MOVE (Area): No teleported location, using most recent item");
-                        var (name, price, hideoutToken, x, y) = _recentItems.Peek();
-                        MoveMouseToItemLocation(x, y);
+                        LogMessage("🚫 MOUSE MOVE BLOCKED (Area): Purchase window opened but previous window was not closed (preventing accidental purchases)");
                     }
                 }
                 _lastPurchaseWindowVisible = areaChangePurchaseWindowVisible;
@@ -1911,9 +2003,18 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
         // Check if purchase window just became visible and learn coordinates + move mouse to teleported item
         bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
+        
+        // Track window close events to allow mouse movement on next open
+        if (!currentPurchaseWindowVisible && _lastPurchaseWindowVisible)
+        {
+            LogMessage("🚪 PURCHASE WINDOW CLOSED: Mouse movement will be allowed on next window open");
+            _windowWasClosedSinceLastMovement = true;
+            _allowMouseMovement = true;
+        }
+        
         if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible)
         {
-            LogMessage($"🖱️ PURCHASE WINDOW OPENED: MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}");
+            LogMessage($"🖱️ PURCHASE WINDOW OPENED: MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
             
             // Unlock TP when purchase window opens
             if (_tpLocked)
@@ -1926,22 +2027,42 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             // Learn purchase window coordinates for future instant mouse movement
             if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
             {
+                LogMessage($"🎓 LEARNING TRIGGER: Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
                 LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+            }
+            else if (Settings.HasLearnedPurchaseWindow.Value)
+            {
+                LogMessage($"🎓 ALREADY LEARNED: Using stored coordinates ({Settings.PurchaseWindowX.Value}, {Settings.PurchaseWindowY.Value})");
+            }
+            else if (!_teleportedItemLocation.HasValue)
+            {
+                LogMessage("🎓 LEARNING SKIPPED: No teleported item location available for learning");
             }
         }
         if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
         {
-            if (_teleportedItemLocation.HasValue)
+            if (_allowMouseMovement && _windowWasClosedSinceLastMovement)
             {
-                LogMessage($"🖱️ TELEPORT MOUSE MOVE (Main): Purchase window opened, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
-                MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
-                _teleportedItemLocation = null; // Clear after use
+                if (_teleportedItemLocation.HasValue)
+                {
+                    LogMessage($"🖱️ SAFE MOUSE MOVE (Main): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                    MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                    _teleportedItemLocation = null; // Clear after use
+                    _allowMouseMovement = false; // Block further movement until window closes
+                    _windowWasClosedSinceLastMovement = false;
+                }
+                else if (_recentItems.Count > 0)
+                {
+                    LogMessage("🖱️ SAFE FALLBACK MOVE (Main): Window was closed, using most recent item");
+                    var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                    MoveMouseToItemLocation(x, y);
+                    _allowMouseMovement = false; // Block further movement until window closes
+                    _windowWasClosedSinceLastMovement = false;
+                }
             }
-            else if (_recentItems.Count > 0)
+            else
             {
-                LogMessage("🖱️ FALLBACK MOUSE MOVE (Main): No teleported location, using most recent item");
-                var (name, price, hideoutToken, x, y) = _recentItems.Peek();
-                MoveMouseToItemLocation(x, y);
+                LogMessage("🚫 MOUSE MOVE BLOCKED (Main): Purchase window opened but previous window was not closed (preventing accidental purchases)");
             }
         }
         _lastPurchaseWindowVisible = currentPurchaseWindowVisible;
@@ -2104,9 +2225,9 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             {
                 // FINAL CHECK: Ensure absolutely no duplicates
                 var finalDuplicateCheck = _listeners.Any(l => 
-                    l.Config.League.Value == config.League.Value && 
-                    l.Config.SearchId.Value == config.SearchId.Value);
-                
+                l.Config.League.Value == config.League.Value && 
+                l.Config.SearchId.Value == config.SearchId.Value);
+            
                 if (finalDuplicateCheck)
                 {
                     LogMessage($"🛡️ FINAL DUPLICATE PREVENTION: Listener already exists for {config.SearchId.Value}");
@@ -2176,7 +2297,18 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         if (Settings.AutoTp.Value && _tpLocked)
         {
             float remainingTime = 10 - (float)(DateTime.Now - _tpLockedTime).TotalSeconds;
-            ImGui.Text($"TP Locked: {remainingTime:F1}s");
+            
+            // Check if timeout reached and unlock if needed
+            if (remainingTime <= 0)
+            {
+                LogMessage("🔓 TP UNLOCKED: 10-second timeout reached in display, unlocking TP");
+                _tpLocked = false;
+                _tpLockedTime = DateTime.MinValue;
+            }
+            else
+            {
+                ImGui.Text($"TP Locked: {remainingTime:F1}s");
+            }
         }
 
         // Use child windows and proper spacing for better auto-sizing
@@ -2184,9 +2316,9 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         {
             ImGui.Text("🔍 Search Listeners:");
             ImGui.Spacing();
-            
-            foreach (var listener in _listeners)
-            {
+
+        foreach (var listener in _listeners)
+        {
                 string status = "Unknown";
                 if (listener.IsConnecting) status = "🔄 Connecting";
                 else if (listener.IsRunning) status = "✅ Connected";
@@ -2196,21 +2328,14 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 
                 // Indent additional info
                 if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds ||
-                    (DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 10 ||
                     listener.ConnectionAttempts > 0)
                 {
                     ImGui.Indent();
                     
-                    if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
-                    {
-                        float remainingCooldown = RestartCooldownSeconds - (float)(DateTime.Now - listener.LastErrorTime).TotalSeconds;
+            if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
+            {
+                float remainingCooldown = RestartCooldownSeconds - (float)(DateTime.Now - listener.LastErrorTime).TotalSeconds;
                         ImGui.Text($"⏱️ Error Cooldown: {remainingCooldown:F1}s");
-                    }
-                    
-                    if ((DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 10)
-                    {
-                        float remainingThrottle = 10 - (float)(DateTime.Now - listener.LastConnectionAttempt).TotalSeconds;
-                        ImGui.Text($"⏸️ Throttle: {remainingThrottle:F1}s");
                     }
                     
                     if (listener.ConnectionAttempts > 0)
@@ -2433,6 +2558,23 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         if (!ImGui.IsItemActive())
         {
             _settingsUpdated = false;
+        }
+        
+        // Purchase window coordinate learning status and reset
+        if (Settings.HasLearnedPurchaseWindow.Value)
+        {
+            ImGui.Text($"📍 Learned coordinates: ({Settings.PurchaseWindowX.Value}, {Settings.PurchaseWindowY.Value})");
+            if (ImGui.Button("🔄 Reset Learned Coordinates"))
+            {
+                Settings.HasLearnedPurchaseWindow.Value = false;
+                Settings.PurchaseWindowX.Value = 0;
+                Settings.PurchaseWindowY.Value = 0;
+                LogMessage("🔄 RESET: Cleared learned purchase window coordinates - will learn again on next TP");
+            }
+        }
+        else
+        {
+            ImGui.Text("📍 Coordinates: Not learned yet (will learn on first TP)");
         }
 
         var autoBuy = Settings.AutoBuy.Value;
