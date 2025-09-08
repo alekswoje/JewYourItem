@@ -675,6 +675,9 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         // Clear the listeners list
         _listeners.Clear();
         
+        // Force immediate GUI update by clearing any pending state
+        _lastActiveConfigsHash = "";
+        
         // Clear recent items
         lock (_recentItemsLock)
         {
@@ -683,6 +686,9 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         
         // Reset global connection attempts
         _globalConnectionAttempts = 0;
+        
+        // Disable the plugin to prevent immediate restart
+        Settings.Enable.Value = false;
         
         LogMessage("✅ All listeners force stopped - plugin fully disabled.");
     }
