@@ -39,6 +39,9 @@ public class JewYourItemSettings : ISettings
     [Menu("Move Mouse to Item", "Move mouse cursor to highlighted items")]
     [IgnoreMenu]
     public ToggleNode MoveMouseToItem { get; set; } = new ToggleNode(false);
+    [Menu("Auto Buy", "Automatically Ctrl+Left Click after moving mouse to item")]
+    [IgnoreMenu]
+    public ToggleNode AutoBuy { get; set; } = new ToggleNode(false);
     public Vector2 WindowPosition { get; set; } = new Vector2(10, 800);
     public List<SearchGroup> Groups { get; set; } = new List<SearchGroup>();
     [JsonIgnore]

@@ -20,6 +20,7 @@ using System.IO.Compression;
 using System.Media;
 using System.Windows.Forms;
 using System.Text.RegularExpressions;
+using System.Runtime.InteropServices;
 
 namespace JewYourItem;
 
@@ -43,6 +44,11 @@ public class RateLimiter
         public DateTime ResetTime { get; set; }
         public int Period { get; set; } // in seconds
         public int Penalty { get; set; } // in seconds
+        public int SafeMax { get; set; } // 50% of actual max for safety
+        public int EmergencyThreshold { get; set; } // 40% of actual max for emergency brake
+        public DateTime LastRequestTime { get; set; }
+        public int RequestCount { get; set; }
+        public int BurstCount { get; set; } // Track burst requests
     }
 
     public void ParseRateLimitHeaders(HttpResponseMessage response)
@@ -70,7 +76,12 @@ public class RateLimiter
                                     Max = hits,
                                     Period = period,
                                     Penalty = penalty,
-                                    ResetTime = DateTime.Now.AddSeconds(period)
+                                    ResetTime = DateTime.Now.AddSeconds(period),
+                                    SafeMax = Math.Max(1, hits / 2), // Use only 50% of actual limit
+                                    EmergencyThreshold = Math.Max(1, (int)(hits * 0.4)), // Emergency brake at 40%
+                                    LastRequestTime = DateTime.Now,
+                                    RequestCount = 0,
+                                    BurstCount = 0
                                 };
                             }
                         }
@@ -218,9 +229,26 @@ public class RateLimiter
         lock (_lock)
         {
             if (!_rateLimits.ContainsKey(scope))
-                return 0; // No rate limit info, no delay
+                return 1000; // Default 1 second delay if no info
 
             var state = _rateLimits[scope];
+            var now = DateTime.Now;
+            
+            // Update request tracking
+            state.RequestCount++;
+            if ((now - state.LastRequestTime).TotalSeconds < 1)
+            {
+                state.BurstCount++;
+            }
+            else
+            {
+                state.BurstCount = 1; // Reset burst count
+            }
+            state.LastRequestTime = now;
+
+            // Calculate usage against our SAFE limit (50% of actual)
+            var safeUsagePercentage = (double)state.Hits / state.SafeMax;
+            var emergencyUsagePercentage = (double)state.Hits / state.EmergencyThreshold;
             var usagePercentage = (double)state.Hits / state.Max;
 
             // Calculate adaptive delay based on usage percentage
@@ -238,8 +266,261 @@ public class RateLimiter
     }
 }
 
+public class ConservativeRateLimiter
+{
+    private readonly Dictionary<string, ConservativeRateLimitState> _rateLimits = new Dictionary<string, ConservativeRateLimitState>();
+    private readonly object _lock = new object();
+    private readonly Action<string> _logMessage;
+    private readonly Action<string> _logError;
+
+    public ConservativeRateLimiter(Action<string> logMessage, Action<string> logError)
+    {
+        _logMessage = logMessage;
+        _logError = logError;
+    }
+
+    public class ConservativeRateLimitState
+    {
+        public int Hits { get; set; }
+        public int Max { get; set; }
+        public DateTime ResetTime { get; set; }
+        public int Period { get; set; }
+        public int Penalty { get; set; }
+        public int SafeMax { get; set; } // 50% of actual max for safety
+        public int EmergencyThreshold { get; set; } // 40% of actual max for emergency brake
+        public DateTime LastRequestTime { get; set; }
+        public int RequestCount { get; set; }
+        public int BurstCount { get; set; }
+        public int ConsecutiveHighUsage { get; set; } // Track consecutive high usage periods
+    }
+
+    public void ParseRateLimitHeaders(HttpResponseMessage response)
+    {
+        try
+        {
+            // Parse X-Rate-Limit-Rules header
+            if (response.Headers.TryGetValues("X-Rate-Limit-Rules", out var rulesHeader))
+            {
+                var rules = string.Join(",", rulesHeader).Split(',');
+                foreach (var rule in rules)
+                {
+                    var parts = rule.Trim().Split(':');
+                    if (parts.Length >= 4)
+                    {
+                        var scope = parts[0];
+                        if (int.TryParse(parts[1], out var hits) &&
+                            int.TryParse(parts[2], out var period) &&
+                            int.TryParse(parts[3], out var penalty))
+                        {
+                            lock (_lock)
+                            {
+                                _rateLimits[scope] = new ConservativeRateLimitState
+                                {
+                                    Max = hits,
+                                    Period = period,
+                                    Penalty = penalty,
+                                    ResetTime = DateTime.Now.AddSeconds(period),
+                                    SafeMax = Math.Max(1, hits / 2), // Use only 50% of actual limit
+                                    EmergencyThreshold = Math.Max(1, (int)(hits * 0.4)), // Emergency brake at 40%
+                                    LastRequestTime = DateTime.Now,
+                                    RequestCount = 0,
+                                    BurstCount = 0,
+                                    ConsecutiveHighUsage = 0
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Parse X-Rate-Limit-Account header
+            if (response.Headers.TryGetValues("X-Rate-Limit-Account", out var accountHeader))
+            {
+                var accountData = string.Join(",", accountHeader).Split(',');
+                foreach (var data in accountData)
+                {
+                    var parts = data.Trim().Split(':');
+                    if (parts.Length >= 3)
+                    {
+                        var scope = "account";
+                        if (int.TryParse(parts[0], out var hits) &&
+                            int.TryParse(parts[1], out var max) &&
+                            int.TryParse(parts[2], out var remaining))
+                        {
+                            lock (_lock)
+                            {
+                                if (_rateLimits.ContainsKey(scope))
+                                {
+                                    _rateLimits[scope].Hits = hits;
+                                    _rateLimits[scope].Max = max;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logError($"Error parsing rate limit headers: {ex.Message}");
+        }
+    }
+
+    public async Task<bool> CheckAndWaitIfNeeded(string scope = "account")
+    {
+        var delay = GetConservativeDelay(scope);
+        if (delay > 0)
+        {
+            _logMessage($"🛡️ CONSERVATIVE RATE LIMITING: {scope} - waiting {delay}ms for safety...");
+            await Task.Delay(delay);
+        }
+        return true;
+    }
+
+    public async Task<int> HandleRateLimitResponse(HttpResponseMessage response)
+    {
+        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+        {
+            // Parse Retry-After header
+            if (response.Headers.TryGetValues("Retry-After", out var retryAfterHeader))
+            {
+                if (int.TryParse(retryAfterHeader.First(), out var retryAfterSeconds))
+                {
+                    var waitTime = retryAfterSeconds * 1000;
+                    _logMessage($"🚨 RATE LIMITED! Waiting {retryAfterSeconds} seconds before retry...");
+                    await Task.Delay(waitTime);
+                    return waitTime;
+                }
+            }
+            else
+            {
+                _logMessage("🚨 RATE LIMITED! No Retry-After header, waiting 60 seconds...");
+                await Task.Delay(60000);
+                return 60000;
+            }
+        }
+
+        // Parse rate limit headers for future requests
+        ParseRateLimitHeaders(response);
+        return 0;
+    }
+
+    private int GetConservativeDelay(string scope = "account")
+    {
+        lock (_lock)
+        {
+            if (!_rateLimits.ContainsKey(scope))
+                return 2000; // Default 2 second delay if no info
+
+            var state = _rateLimits[scope];
+            var now = DateTime.Now;
+            
+            // Update request tracking
+            state.RequestCount++;
+            if ((now - state.LastRequestTime).TotalSeconds < 1)
+            {
+                state.BurstCount++;
+            }
+            else
+            {
+                state.BurstCount = 1;
+            }
+            state.LastRequestTime = now;
+
+            // Calculate usage against our SAFE limit (50% of actual)
+            var safeUsagePercentage = (double)state.Hits / state.SafeMax;
+            var emergencyUsagePercentage = (double)state.Hits / state.EmergencyThreshold;
+
+            // EMERGENCY BRAKE: If we're approaching our emergency threshold (40% of actual limit)
+            if (emergencyUsagePercentage >= 1.0)
+            {
+                state.ConsecutiveHighUsage++;
+                _logMessage($"🚨 EMERGENCY BRAKE: {scope} at {emergencyUsagePercentage:P1} of emergency threshold! Waiting 15 seconds...");
+                return 15000; // 15 seconds emergency brake
+            }
+
+            // BURST PROTECTION: If we're making too many requests too quickly
+            if (state.BurstCount > 2) // More conservative than before
+            {
+                _logMessage($"⚠️ BURST PROTECTION: {scope} made {state.BurstCount} requests in 1 second. Waiting 5 seconds...");
+                return 5000; // 5 seconds burst protection
+            }
+
+            // CONSERVATIVE DELAYS: Much more aggressive than before
+            if (safeUsagePercentage >= 0.7) // 70% of our 50% = 35% of actual limit
+            {
+                state.ConsecutiveHighUsage++;
+                return 8000; // 8 seconds if at 35% of actual limit
+            }
+            else if (safeUsagePercentage >= 0.5) // 50% of our 50% = 25% of actual limit
+            {
+                state.ConsecutiveHighUsage++;
+                return 5000; // 5 seconds if at 25% of actual limit
+            }
+            else if (safeUsagePercentage >= 0.3) // 30% of our 50% = 15% of actual limit
+            {
+                state.ConsecutiveHighUsage++;
+                return 3000; // 3 seconds if at 15% of actual limit
+            }
+            else if (safeUsagePercentage >= 0.1) // 10% of our 50% = 5% of actual limit
+            {
+                state.ConsecutiveHighUsage = 0; // Reset consecutive high usage
+                return 1500; // 1.5 seconds if at 5% of actual limit
+            }
+            
+            // Reset consecutive high usage if we're in safe zone
+            state.ConsecutiveHighUsage = 0;
+            
+            // MINIMUM DELAY: Always have a delay to be safe
+            return 1000; // 1 second minimum delay
+        }
+    }
+
+    public void LogCurrentState()
+    {
+        lock (_lock)
+        {
+            foreach (var kvp in _rateLimits)
+            {
+                var state = kvp.Value;
+                var safeUsagePercentage = (double)state.Hits / state.SafeMax;
+                var actualUsagePercentage = (double)state.Hits / state.Max;
+                _logMessage($"🛡️ Rate limit {kvp.Key}: {state.Hits}/{state.Max} (Actual: {actualUsagePercentage:P1}, Safe: {safeUsagePercentage:P1}) - Resets in {(state.ResetTime - DateTime.Now).TotalSeconds:F1}s");
+            }
+        }
+    }
+}
+
 public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 {
+    // Windows API declarations for mouse clicks
+    [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
+    public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool GetKeyboardState(byte[] lpKeyState);
+
+    [DllImport("user32.dll")]
+    static extern void SetKeyboardState(byte[] lpKeyState);
+
+    [DllImport("user32.dll")]
+    static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+    [DllImport("user32.dll")]
+    static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    // Mouse event flags
+    private const uint MOUSEEVENTF_LEFTDOWN = 0x02;
+    private const uint MOUSEEVENTF_LEFTUP = 0x04;
+    private const uint MOUSEEVENTF_RIGHTDOWN = 0x08;
+    private const uint MOUSEEVENTF_RIGHTUP = 0x10;
+
+    // Key event flags
+    private const uint KEYEVENTF_KEYDOWN = 0x0000;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const byte VK_CONTROL = 0x11;
+
     private List<SearchListener> _listeners = new List<SearchListener>();
     private string _sessionIdBuffer = "";
     private List<string> _recentResponses = new List<string>();
@@ -252,14 +533,20 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private bool _settingsUpdated = false;
     private SearchListener _activeListener;
     private Dictionary<JewYourItemInstanceSettings, DateTime> _lastRestartTimes = new Dictionary<JewYourItemInstanceSettings, DateTime>();
-    private const int RestartCooldownSeconds = 60;
+    private const int RestartCooldownSeconds = 300; // Increased to 5 minutes for safety
     private bool _lastEnableState = true;
     private string _lastActiveConfigsHash = "";
-    private RateLimiter _rateLimiter;
+    private ConservativeRateLimiter _rateLimiter;
+    private bool _lastPurchaseWindowVisible = false;
+    private static int _globalConnectionAttempts = 0;
+    private static DateTime _pluginStartTime = DateTime.Now;
+    private static bool _emergencyShutdown = false;
+    private DateTime _lastTickProcessTime = DateTime.MinValue;
+    private DateTime _lastAreaChangeTime = DateTime.MinValue;
 
     public override bool Initialise()
     {
-        _rateLimiter = new RateLimiter(LogMessage, LogError);
+        _rateLimiter = new ConservativeRateLimiter(LogMessage, LogError);
         _sessionIdBuffer = Settings.SessionId.Value ?? "";
         if (string.IsNullOrEmpty(_sessionIdBuffer))
         {
@@ -338,7 +625,11 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         public ClientWebSocket WebSocket { get; set; }
         public CancellationTokenSource Cts { get; set; }
         public bool IsRunning { get; set; }
+        public bool IsConnecting { get; set; } = false;
+        public DateTime LastConnectionAttempt { get; set; } = DateTime.MinValue;
         public DateTime LastErrorTime { get; set; } = DateTime.MinValue;
+        public int ConnectionAttempts { get; set; } = 0;
+        private readonly object _connectionLock = new object();
         private StringBuilder _messageBuffer = new StringBuilder();
         private readonly Action<string> _logMessage;
         private readonly Action<string> _logError;
@@ -354,33 +645,80 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
         public async void Start(Action<string> logMessage, Action<string> logError, string sessionId)
         {
-            if (string.IsNullOrEmpty(Config.League.Value) || string.IsNullOrEmpty(Config.SearchId.Value) || string.IsNullOrEmpty(sessionId))
+            lock (_connectionLock)
             {
-                _logError("League, Search ID, or Session ID is empty for this search.");
-                LastErrorTime = DateTime.Now;
-                return;
+                // STRICT CONNECTION SAFETY CHECKS
+                if (string.IsNullOrEmpty(Config.League.Value) || string.IsNullOrEmpty(Config.SearchId.Value) || string.IsNullOrEmpty(sessionId))
+                {
+                    _logError("League, Search ID, or Session ID is empty for this search.");
+                    LastErrorTime = DateTime.Now;
+                    return;
+                }
+
+                // Check if already running or connecting
+                if (IsRunning || IsConnecting)
+                {
+                    _logMessage($"🛡️ CONNECTION BLOCKED: Search {Config.SearchId.Value} already running ({IsRunning}) or connecting ({IsConnecting})");
+                    return;
+                }
+
+                // Check if WebSocket is still active
+                if (WebSocket != null && (WebSocket.State == WebSocketState.Open || WebSocket.State == WebSocketState.Connecting))
+                {
+                    _logMessage($"🛡️ CONNECTION BLOCKED: WebSocket for {Config.SearchId.Value} still active (State: {WebSocket.State})");
+                    return;
+                }
+
+                // Rate limit cooldown check
+                if ((DateTime.Now - LastErrorTime).TotalSeconds < JewYourItem.RestartCooldownSeconds)
+                {
+                    _logMessage($"🛡️ CONNECTION BLOCKED: Search {Config.SearchId.Value} in rate limit cooldown ({JewYourItem.RestartCooldownSeconds - (DateTime.Now - LastErrorTime).TotalSeconds:F1}s remaining)");
+                    return;
+                }
+
+                // EMERGENCY: Connection attempt throttling (max 1 attempt per 30 seconds)
+                if ((DateTime.Now - LastConnectionAttempt).TotalSeconds < 30)
+                {
+                    _logMessage($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} connection throttled ({30 - (DateTime.Now - LastConnectionAttempt).TotalSeconds:F1}s remaining)");
+                    return;
+                }
+
+                // EMERGENCY: Max connection attempts per hour (extremely limited)
+                if (ConnectionAttempts >= 3 && (DateTime.Now - LastConnectionAttempt).TotalHours < 1)
+                {
+                    _logMessage($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} exceeded max connection attempts (3 per HOUR)");
+                    return;
+                }
+
+                // EMERGENCY: Global session connection limit
+                if (ConnectionAttempts >= 10)
+                {
+                    _logMessage($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} exceeded TOTAL session limit (10 attempts EVER)");
+                    return;
+                }
+
+                // Reset connection attempts counter if more than 1 HOUR has passed
+                if ((DateTime.Now - LastConnectionAttempt).TotalHours >= 1)
+                {
+                    ConnectionAttempts = Math.Min(ConnectionAttempts, 5); // Partial reset, keep some penalty
+                }
+
+                // EMERGENCY: Check global limits
+                JewYourItem._globalConnectionAttempts++;
+                if (JewYourItem._globalConnectionAttempts > 3)
+                {
+                    _logMessage($"🚨🚨🚨 GLOBAL EMERGENCY SHUTDOWN: Too many connection attempts ({JewYourItem._globalConnectionAttempts})");
+                    JewYourItem._emergencyShutdown = true;
+                    return;
+                }
+
+                // Set connection state flags
+                IsConnecting = true;
+                LastConnectionAttempt = DateTime.Now;
+                ConnectionAttempts++;
+                
+                _logMessage($"🔌 STARTING CONNECTION: Search {Config.SearchId.Value} (Attempt #{ConnectionAttempts}, Global: {JewYourItem._globalConnectionAttempts})");
             }
-
-            if (IsRunning) return;
-
-            if ((DateTime.Now - LastErrorTime).TotalSeconds < JewYourItem.RestartCooldownSeconds)
-            {
-                _logMessage($"Start skipped for search {Config.SearchId.Value}: Rate limit cooldown active.");
-                return;
-            }
-
-            IsRunning = true;
-            WebSocket = new ClientWebSocket();
-            var cookie = $"POESESSID={sessionId}";
-            WebSocket.Options.SetRequestHeader("Cookie", cookie);
-            WebSocket.Options.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
-            WebSocket.Options.SetRequestHeader("Origin", "https://www.pathofexile.com");
-            WebSocket.Options.SetRequestHeader("Accept-Encoding", "gzip, deflate, br, zstd");
-            WebSocket.Options.SetRequestHeader("Accept-Language", "en-US,en;q=0.9");
-            WebSocket.Options.SetRequestHeader("Pragma", "no-cache");
-            WebSocket.Options.SetRequestHeader("Cache-Control", "no-cache");
-            WebSocket.Options.SetRequestHeader("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits");
-
             try
             {
                 // Check rate limits before connecting WebSocket
@@ -389,18 +727,64 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     await _parent._rateLimiter.CheckAndWaitIfNeeded("client");
                 }
                 
+                // Dispose any existing WebSocket
+                if (WebSocket != null)
+                {
+                    try
+                    {
+                        WebSocket.Dispose();
+                    }
+                    catch { /* Ignore disposal errors */ }
+                    WebSocket = null;
+                }
+
+                WebSocket = new ClientWebSocket();
+                var cookie = $"POESESSID={sessionId}";
+                WebSocket.Options.SetRequestHeader("Cookie", cookie);
+                WebSocket.Options.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
+                WebSocket.Options.SetRequestHeader("Origin", "https://www.pathofexile.com");
+                WebSocket.Options.SetRequestHeader("Accept-Encoding", "gzip, deflate, br, zstd");
+                WebSocket.Options.SetRequestHeader("Accept-Language", "en-US,en;q=0.9");
+                WebSocket.Options.SetRequestHeader("Pragma", "no-cache");
+                WebSocket.Options.SetRequestHeader("Cache-Control", "no-cache");
+                WebSocket.Options.SetRequestHeader("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits");
+                
                 string url = $"wss://www.pathofexile.com/api/trade2/live/poe2/{Uri.EscapeDataString(Config.League.Value)}/{Config.SearchId.Value}";
+                
+                _logMessage($"🔌 CONNECTING: {Config.SearchId.Value} to {url}");
                 await WebSocket.ConnectAsync(new Uri(url), Cts.Token);
 
-                _logMessage($"Connected to WebSocket for search: {Config.SearchId.Value}");
+                lock (_connectionLock)
+                {
+                    IsConnecting = false;
+                    IsRunning = true;
+                }
+                
+                _logMessage($"✅ CONNECTED: WebSocket for search {Config.SearchId.Value}");
                 _parent._activeListener = this;
                 _ = ReceiveMessagesAsync(_logMessage, _logError, sessionId);
             }
             catch (Exception ex)
             {
-                _logError($"WebSocket connection failed for search {Config.SearchId.Value}: {ex.Message}");
+                lock (_connectionLock)
+                {
+                    IsConnecting = false;
+                    IsRunning = false;
+                }
+                
+                _logError($"❌ CONNECTION FAILED: Search {Config.SearchId.Value}: {ex.Message}");
                 LastErrorTime = DateTime.Now;
-                IsRunning = false;
+                
+                // Clean up WebSocket on failure
+                if (WebSocket != null)
+                {
+                    try
+                    {
+                        WebSocket.Dispose();
+                    }
+                    catch { /* Ignore disposal errors */ }
+                    WebSocket = null;
+                }
             }
         }
 
@@ -420,7 +804,12 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                         result = await WebSocket.ReceiveAsync(bufferSegment, Cts.Token);
                         if (result.MessageType == WebSocketMessageType.Close)
                         {
-                            logMessage($"WebSocket closed by server for {Config.SearchId.Value}.");
+                            lock (_connectionLock)
+                            {
+                                IsRunning = false;
+                                IsConnecting = false;
+                            }
+                            logMessage($"🔌 DISCONNECTED: WebSocket closed by server for {Config.SearchId.Value}");
                             LastErrorTime = DateTime.Now;
                             return;
                         }
@@ -441,12 +830,22 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 }
                 catch (Exception ex)
                 {
-                    logError($"WebSocket error for {Config.SearchId.Value}: {ex.Message}");
+                    lock (_connectionLock)
+                    {
+                        IsRunning = false;
+                        IsConnecting = false;
+                    }
+                    logError($"❌ WEBSOCKET ERROR: {Config.SearchId.Value}: {ex.Message}");
                     LastErrorTime = DateTime.Now;
                     break;
                 }
             }
-            IsRunning = false;
+            
+            lock (_connectionLock)
+            {
+                IsRunning = false;
+                IsConnecting = false;
+            }
         }
 
         private string CleanMessage(string message, Action<string> logMessage, Action<string> logError)
@@ -530,20 +929,37 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     var wsResponse = JsonConvert.DeserializeObject<WsResponse>(cleanMessage);
                     if (wsResponse.New != null && wsResponse.New.Length > 0)
                     {
-                        string ids = string.Join(",", wsResponse.New);
-                        string fetchUrl = $"https://www.pathofexile.com/api/trade2/fetch/{ids}?query={Config.SearchId.Value}&realm=poe2";
-
                         // Ensure rate limiter is initialized
                         if (_parent._rateLimiter == null)
                         {
-                            _parent._rateLimiter = new RateLimiter(_parent.LogMessage, _parent.LogError);
+                            _parent._rateLimiter = new ConservativeRateLimiter(_parent.LogMessage, _parent.LogError);
                         }
-                        
-                        // Check rate limits before making request
-                        await _parent._rateLimiter.CheckAndWaitIfNeeded("account");
 
-                        using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
+                        // Split items into batches of 10 (API limit)
+                        const int maxItemsPerBatch = 10;
+                        var itemBatches = new List<string[]>();
+                        
+                        for (int i = 0; i < wsResponse.New.Length; i += maxItemsPerBatch)
                         {
+                            var batch = wsResponse.New.Skip(i).Take(maxItemsPerBatch).ToArray();
+                            itemBatches.Add(batch);
+                        }
+
+                        logMessage($"📦 PROCESSING {wsResponse.New.Length} items in {itemBatches.Count} batches (max {maxItemsPerBatch} per batch)");
+
+                        // Process each batch separately
+                        foreach (var batch in itemBatches)
+                        {
+                            // Check rate limits before each batch request
+                            await _parent._rateLimiter.CheckAndWaitIfNeeded("account");
+
+                            string ids = string.Join(",", batch);
+                            string fetchUrl = $"https://www.pathofexile.com/api/trade2/fetch/{ids}?query={Config.SearchId.Value}&realm=poe2";
+                            
+                            logMessage($"🔍 FETCHING batch of {batch.Length} items: {ids}");
+
+                            using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
+                            {
                             var cookie = $"POESESSID={sessionId}";
                             request.Headers.Add("Cookie", cookie);
                             request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
@@ -584,6 +1000,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                     var itemResponse = JsonConvert.DeserializeObject<ItemFetchResponse>(content);
                                     if (itemResponse.Result != null && itemResponse.Result.Any())
                                     {
+                                        logMessage($"✅ BATCH SUCCESS: Received {itemResponse.Result.Length} items from batch");
                                         foreach (var item in itemResponse.Result)
                                         {
                                             string name = item.Item.Name;
@@ -666,6 +1083,10 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                             }
                                         }
                                     }
+                                    else
+                                    {
+                                        logMessage($"⚠️ BATCH EMPTY: No items returned from batch");
+                                    }
                                 }
                                 else
                                 {
@@ -674,11 +1095,11 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                     // Rate limiting is now handled above
                                     if (response.StatusCode == System.Net.HttpStatusCode.NotFound && errorMessage.Contains("Resource not found; Item no longer available"))
                                     {
-                                        logMessage("[WARNING] Item unavailable: " + errorMessage);
+                                        logMessage($"⚠️ BATCH WARNING: Items unavailable in batch: {errorMessage}");
                                     }
                                     else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest && errorMessage.Contains("Invalid query"))
                                     {
-                                        logMessage("[WARNING] Invalid query for item: " + errorMessage);
+                                        logMessage($"⚠️ BATCH WARNING: Invalid query for batch: {errorMessage}");
                                         if (_parent._recentItems.Count > 0)
                                         {
                                             _parent._recentItems.Dequeue();
@@ -686,19 +1107,21 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                     }
                                     else
                                     {
-                                        logError($"Fetch failed: {response.StatusCode} - {errorMessage}");
+                                        logError($"❌ BATCH FAILED: {response.StatusCode} - {errorMessage}");
+                                        break; // Stop processing remaining batches on serious error
                                     }
                                 }
-                            }
-                        }
-                    }
+                            } // End of using (var response = await _httpClient.SendAsync(request))
+                        } // End of using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
+                        } // End of batch processing foreach loop
+                    } // End of if (wsResponse.New != null && wsResponse.New.Length > 0)
                 }
                 catch (JsonException parseEx)
                 {
                     logError($"JSON parsing failed: {parseEx.Message}");
                     LastErrorTime = DateTime.Now;
                 }
-            }
+            } // End of outer try block
             catch (JsonException jsonEx)
             {
                 logError($"JSON parsing failed: {jsonEx.Message}");
@@ -713,63 +1136,125 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
         public void Stop()
         {
-            if (WebSocket != null && WebSocket.State == WebSocketState.Open)
+            lock (_connectionLock)
             {
-                try
+                _logMessage($"🛑 STOPPING: Search {Config.SearchId.Value} (Running: {IsRunning}, Connecting: {IsConnecting})");
+                
+                IsRunning = false;
+                IsConnecting = false;
+                
+                if (Cts != null && !Cts.IsCancellationRequested)
                 {
-                    Cts.Cancel();
-                    // Use Task.Run to avoid blocking the main thread
-                    Task.Run(async () =>
+                    try
                     {
-                        try
+                        Cts.Cancel();
+                    }
+                    catch { /* Ignore cancellation errors */ }
+                }
+                
+                if (WebSocket != null)
+                {
+                    try
+                    {
+                        if (WebSocket.State == WebSocketState.Open)
                         {
-                            await WebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Plugin stopped", CancellationToken.None);
+                            // Use Task.Run to avoid blocking the main thread
+                            Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await WebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Plugin stopped", CancellationToken.None);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logError($"Error closing WebSocket: {ex.Message}");
+                                }
+                                finally
+                                {
+                                    try
+                                    {
+                                        WebSocket.Dispose();
+                                    }
+                                    catch { /* Ignore disposal errors */ }
+                                }
+                            });
                         }
-                        catch (Exception ex)
-                        {
-                            _logError($"Error closing WebSocket: {ex.Message}");
-                        }
-                        finally
+                        else
                         {
                             WebSocket.Dispose();
-                            WebSocket = null;
-                            IsRunning = false;
                         }
-                    });
+                    }
+                    catch (Exception ex)
+                    {
+                        _logError($"Error during WebSocket cleanup: {ex.Message}");
+                    }
+                    finally
+                    {
+                        WebSocket = null;
+                    }
                 }
-                catch (Exception ex)
-                {
-                    _logError($"Error initiating WebSocket close: {ex.Message}");
-                    WebSocket?.Dispose();
-                    WebSocket = null;
-                    IsRunning = false;
-                }
-            }
-            else
-            {
-                Cts?.Cancel();
-                WebSocket?.Dispose();
-                WebSocket = null;
-                IsRunning = false;
+                
+                _logMessage($"✅ STOPPED: Search {Config.SearchId.Value}");
             }
         }
 
-        private void MoveMouseToItemLocation(int x, int y, Action<string> logMessage)
+        private async void MoveMouseToItemLocation(int x, int y, Action<string> logMessage)
         {
-            var purchaseWindow = _parent.GameController.IngameState.IngameUi.PurchaseWindowHideout;
-            if (purchaseWindow.IsVisible)
+            try
             {
+                var purchaseWindow = _parent.GameController.IngameState.IngameUi.PurchaseWindowHideout;
+                if (!purchaseWindow.IsVisible)
+                {
+                    logMessage("MoveMouseToItemLocation: Purchase window is not visible");
+                    return;
+                }
+
                 var stashPanel = purchaseWindow.TabContainer.StashInventoryPanel;
+                if (stashPanel == null)
+                {
+                    logMessage("MoveMouseToItemLocation: Stash panel is null");
+                    return;
+                }
+
                 var rect = stashPanel.GetClientRectCache;
+                if (rect.Width <= 0 || rect.Height <= 0)
+                {
+                    logMessage("MoveMouseToItemLocation: Invalid stash panel dimensions");
+                    return;
+                }
+
                 float cellWidth = rect.Width / 12.0f;
                 float cellHeight = rect.Height / 12.0f;
                 var topLeft = rect.TopLeft;
+                
+                // Calculate item position within the stash panel
                 int itemX = (int)(topLeft.X + (x * cellWidth) + (cellWidth / 2));
                 int itemY = (int)(topLeft.Y + (y * cellHeight) + (cellHeight / 2));
+                
+                // Get game window position
                 var windowRect = _parent.GameController.Window.GetWindowRectangle();
                 System.Drawing.Point windowPos = new System.Drawing.Point((int)windowRect.X, (int)windowRect.Y);
-                System.Windows.Forms.Cursor.Position = new System.Drawing.Point(windowPos.X + itemX, windowPos.Y + itemY);
-                logMessage($"Moved mouse to item location: ({itemX}, {itemY})");
+                
+                // Calculate final screen position
+                int finalX = windowPos.X + itemX;
+                int finalY = windowPos.Y + itemY;
+                
+                // Move mouse cursor
+                System.Windows.Forms.Cursor.Position = new System.Drawing.Point(finalX, finalY);
+                
+                logMessage($"Moved mouse to item location: Stash({x},{y}) -> Screen({finalX},{finalY}) - Panel size: {rect.Width}x{rect.Height}");
+                
+                // Auto Buy: Perform Ctrl+Left Click if enabled
+                if (_parent.Settings.AutoBuy.Value)
+                {
+                    logMessage("🛒 AUTO BUY: Enabled, performing purchase click...");
+                    await Task.Delay(100); // Small delay to ensure mouse movement is complete
+                    await _parent.PerformCtrlLeftClickAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                logMessage($"MoveMouseToItemLocation failed: {ex.Message}");
             }
         }
     }
@@ -837,7 +1322,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             // Ensure rate limiter is initialized
             if (_rateLimiter == null)
             {
-                _rateLimiter = new RateLimiter(LogMessage, LogError);
+                _rateLimiter = new ConservativeRateLimiter(LogMessage, LogError);
             }
             
             // Check rate limits before making request
@@ -886,36 +1371,131 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         }
     }
 
-    private void MoveMouseToItemLocation(int x, int y)
+    public async Task PerformCtrlLeftClickAsync()
     {
-        var purchaseWindow = GameController.IngameState.IngameUi.PurchaseWindowHideout;
-        if (purchaseWindow.IsVisible)
+        try
         {
+            LogMessage("🖱️ AUTO BUY: Performing Ctrl+Left Click...");
+            
+            // Small delay to ensure mouse position is set
+            await Task.Delay(50);
+            
+            // Press Ctrl key down
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+            
+            // Small delay
+            await Task.Delay(10);
+            
+            // Perform left mouse button down
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+            
+            // Small delay
+            await Task.Delay(10);
+            
+            // Perform left mouse button up
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+            
+            // Small delay
+            await Task.Delay(10);
+            
+            // Release Ctrl key
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            
+            LogMessage("✅ AUTO BUY: Ctrl+Left Click completed!");
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ AUTO BUY FAILED: {ex.Message}");
+        }
+    }
+
+    private async void MoveMouseToItemLocation(int x, int y)
+    {
+        try
+        {
+            var purchaseWindow = GameController.IngameState.IngameUi.PurchaseWindowHideout;
+            if (!purchaseWindow.IsVisible)
+            {
+                LogMessage("MoveMouseToItemLocation: Purchase window is not visible");
+                return;
+            }
+
             var stashPanel = purchaseWindow.TabContainer.StashInventoryPanel;
+            if (stashPanel == null)
+            {
+                LogMessage("MoveMouseToItemLocation: Stash panel is null");
+                return;
+            }
+
             var rect = stashPanel.GetClientRectCache;
+            if (rect.Width <= 0 || rect.Height <= 0)
+            {
+                LogMessage("MoveMouseToItemLocation: Invalid stash panel dimensions");
+                return;
+            }
+
             float cellWidth = rect.Width / 12.0f;
             float cellHeight = rect.Height / 12.0f;
             var topLeft = rect.TopLeft;
+            
+            // Calculate item position within the stash panel
             int itemX = (int)(topLeft.X + (x * cellWidth) + (cellWidth / 2));
             int itemY = (int)(topLeft.Y + (y * cellHeight) + (cellHeight / 2));
+            
+            // Get game window position
             var windowRect = GameController.Window.GetWindowRectangle();
             System.Drawing.Point windowPos = new System.Drawing.Point((int)windowRect.X, (int)windowRect.Y);
-            System.Windows.Forms.Cursor.Position = new System.Drawing.Point(windowPos.X + itemX, windowPos.Y + itemY);
-            LogMessage($"Moved mouse to item location: ({itemX}, {itemY})");
+            
+            // Calculate final screen position
+            int finalX = windowPos.X + itemX;
+            int finalY = windowPos.Y + itemY;
+            
+            // Move mouse cursor
+            System.Windows.Forms.Cursor.Position = new System.Drawing.Point(finalX, finalY);
+            
+            LogMessage($"Moved mouse to item location: Stash({x},{y}) -> Screen({finalX},{finalY}) - Panel size: {rect.Width}x{rect.Height}");
+            
+            // Auto Buy: Perform Ctrl+Left Click if enabled
+            if (Settings.AutoBuy.Value)
+            {
+                LogMessage("🛒 AUTO BUY: Enabled, performing purchase click...");
+                await Task.Delay(100); // Small delay to ensure mouse movement is complete
+                await PerformCtrlLeftClickAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"MoveMouseToItemLocation failed: {ex.Message}");
         }
     }
 
     public override void AreaChange(AreaInstance area)
     {
-        StopAll();
+        LogMessage($"🌍 AREA CHANGE: {area?.Area?.Name ?? "Unknown"} - NOT stopping listeners (live searches continue)");
+        _lastAreaChangeTime = DateTime.Now;
+        
+        // DON'T stop all listeners - let them continue running
+        // Live searches should persist across zone changes
+        // Only clear recent items as they're location-specific
+        _recentItems.Clear();
+        LogMessage("📦 Cleared recent items due to area change");
     }
 
     public override async void Tick()
     {
+        // EMERGENCY SHUTDOWN CHECK
+        if (JewYourItem._emergencyShutdown)
+        {
+            LogError("🚨🚨🚨 EMERGENCY SHUTDOWN ACTIVE - Plugin disabled due to connection spam protection");
+            Settings.Enable.Value = false;
+            ForceStopAll();
+            return;
+        }
+
         // Ensure rate limiter is initialized
         if (_rateLimiter == null)
         {
-            _rateLimiter = new RateLimiter(LogMessage, LogError);
+            _rateLimiter = new ConservativeRateLimiter(LogMessage, LogError);
         }
 
         // Check if enable state changed
@@ -935,6 +1515,58 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             return;
         }
 
+        // CRITICAL: Throttle listener management to prevent rapid execution
+        if ((DateTime.Now - _lastTickProcessTime).TotalSeconds < 2)
+        {
+            // Only process hotkeys and basic functionality, skip listener management
+            bool hotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
+            if (hotkeyState && !_lastHotkeyState)
+            {
+                LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
+                TravelToHideout();
+            }
+            _lastHotkeyState = hotkeyState;
+
+            // Check if purchase window just became visible and move mouse to recent item
+            bool purchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
+            if (purchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _recentItems.Count > 0)
+            {
+                LogMessage("Purchase window opened - moving mouse to most recent item");
+                var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                MoveMouseToItemLocation(x, y);
+            }
+            _lastPurchaseWindowVisible = purchaseWindowVisible;
+            return; // Skip listener management
+        }
+
+        // AREA CHANGE PROTECTION: Don't recreate listeners immediately after area change
+        if ((DateTime.Now - _lastAreaChangeTime).TotalSeconds < 10)
+        {
+            LogMessage($"🌍 AREA CHANGE COOLDOWN: Skipping listener management for {10 - (DateTime.Now - _lastAreaChangeTime).TotalSeconds:F1}s after area change");
+            
+            // Still process hotkeys and basic functionality
+            bool areaChangeHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
+            if (areaChangeHotkeyState && !_lastHotkeyState)
+            {
+                LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
+                TravelToHideout();
+            }
+            _lastHotkeyState = areaChangeHotkeyState;
+
+            bool areaChangePurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
+            if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _recentItems.Count > 0)
+            {
+                LogMessage("Purchase window opened - moving mouse to most recent item");
+                var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                MoveMouseToItemLocation(x, y);
+            }
+            _lastPurchaseWindowVisible = areaChangePurchaseWindowVisible;
+            return;
+        }
+
+        _lastTickProcessTime = DateTime.Now;
+        LogMessage("🔄 TICK: Processing listener management...");
+
         bool currentHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
         if (currentHotkeyState && !_lastHotkeyState)
         {
@@ -942,6 +1574,16 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             TravelToHideout();
         }
         _lastHotkeyState = currentHotkeyState;
+
+        // Check if purchase window just became visible and move mouse to recent item
+        bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
+        if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _recentItems.Count > 0)
+        {
+            LogMessage("Purchase window opened - moving mouse to most recent item");
+            var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+            MoveMouseToItemLocation(x, y);
+        }
+        _lastPurchaseWindowVisible = currentPurchaseWindowVisible;
 
         var allConfigs = Settings.Groups
             .Where(g => g.Enable.Value)
@@ -977,11 +1619,30 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 _listeners.Remove(listener);
                 LogMessage($"Stopped listener for disabled search: {listener.Config.SearchId.Value}");
             }
-            else if (!listener.IsRunning)
+            else if (!listener.IsRunning && !listener.IsConnecting)
             {
+                // Multiple safety checks before attempting restart
                 if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
                 {
-                    LogMessage($"Restart skipped for search {listener.Config.SearchId.Value}: Rate limit cooldown active.");
+                    LogMessage($"🛡️ RESTART BLOCKED: Search {listener.Config.SearchId.Value} in error cooldown ({RestartCooldownSeconds - (DateTime.Now - listener.LastErrorTime).TotalSeconds:F1}s remaining)");
+                    continue;
+                }
+
+                if ((DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 60)
+                {
+                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} connection throttled ({60 - (DateTime.Now - listener.LastConnectionAttempt).TotalSeconds:F1}s remaining)");
+                    continue;
+                }
+
+                if (listener.ConnectionAttempts >= 2 && (DateTime.Now - listener.LastConnectionAttempt).TotalHours < 1)
+                {
+                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded restart attempts (2 per HOUR)");
+                    continue;
+                }
+
+                if (listener.ConnectionAttempts >= 5)
+                {
+                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded TOTAL session restart limit (5 EVER)");
                     continue;
                 }
 
@@ -991,8 +1652,8 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     await _rateLimiter.CheckAndWaitIfNeeded("client");
                 }
                 
+                LogMessage($"🔄 ATTEMPTING RESTART: Search {listener.Config.SearchId.Value}");
                 listener.Start(LogMessage, LogError, Settings.SessionId.Value);
-                LogMessage($"Restarted listener for search: {listener.Config.SearchId.Value}");
             }
         }
 
@@ -1000,22 +1661,46 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         foreach (var config in allConfigs)
         {
             var configId = $"{config.League.Value}|{config.SearchId.Value}";
-            var listener = _listeners.FirstOrDefault(l => 
+            
+            // CRITICAL: Check for existing listeners more thoroughly
+            var existingListener = _listeners.FirstOrDefault(l => 
                 l.Config.League.Value == config.League.Value && 
                 l.Config.SearchId.Value == config.SearchId.Value);
             
-            if (listener == null)
+            if (existingListener == null)
             {
+                // DOUBLE-CHECK: Make sure no listener exists for this exact config
+                var duplicateCheck = _listeners.Any(l => 
+                    l.Config.League.Value == config.League.Value && 
+                    l.Config.SearchId.Value == config.SearchId.Value);
+                
+                if (duplicateCheck)
+                {
+                    LogMessage($"🛡️ DUPLICATE PREVENTION: Listener already exists for {config.SearchId.Value}");
+                    continue;
+                }
+                
+                // EMERGENCY: Prevent rapid creation
+                if (JewYourItem._globalConnectionAttempts >= 2)
+                {
+                    LogMessage($"🚨 EMERGENCY: Preventing new listener creation - global limit reached");
+                    continue;
+                }
+                
                 // Check rate limits before creating new WebSocket
                 if (_rateLimiter != null)
                 {
                     await _rateLimiter.CheckAndWaitIfNeeded("client");
                 }
                 
-                listener = new SearchListener(this, config, LogMessage, LogError);
-                _listeners.Add(listener);
-                listener.Start(LogMessage, LogError, Settings.SessionId.Value);
-                LogMessage($"Started new listener for search: {config.SearchId.Value}");
+                var newListener = new SearchListener(this, config, LogMessage, LogError);
+                _listeners.Add(newListener);
+                LogMessage($"🆕 CREATING NEW LISTENER: Search {config.SearchId.Value} (Total listeners: {_listeners.Count})");
+                newListener.Start(LogMessage, LogError, Settings.SessionId.Value);
+            }
+            else
+            {
+                LogMessage($"📍 EXISTING LISTENER: {config.SearchId.Value} (Running: {existingListener.IsRunning}, Connecting: {existingListener.IsConnecting})");
             }
         }
     }
@@ -1037,14 +1722,32 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
         foreach (var listener in _listeners)
         {
+            string status = "Unknown";
+            if (listener.IsConnecting) status = "🔄 Connecting";
+            else if (listener.IsRunning) status = "✅ Connected";
+            else status = "❌ Disconnected";
+            
+            ImGui.Text($"Search {listener.Config.SearchId.Value}: {status}");
+            
             if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
             {
                 float remainingCooldown = RestartCooldownSeconds - (float)(DateTime.Now - listener.LastErrorTime).TotalSeconds;
-                ImGui.Text($"Search {listener.Config.SearchId.Value}: Rate Limit Cooldown: {remainingCooldown:F1}s");
+                ImGui.Text($"  Error Cooldown: {remainingCooldown:F1}s");
+            }
+            
+            if ((DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 10)
+            {
+                float remainingThrottle = 10 - (float)(DateTime.Now - listener.LastConnectionAttempt).TotalSeconds;
+                ImGui.Text($"  Throttle: {remainingThrottle:F1}s");
+            }
+            
+            if (listener.ConnectionAttempts > 0)
+            {
+                ImGui.Text($"  Attempts: {listener.ConnectionAttempts}");
             }
         }
 
-        ImGui.Text($"JewYourItem: {_listeners.Count(l => l.IsRunning)} active");
+        ImGui.Text($"JewYourItem: {_listeners.Count(l => l.IsRunning)}/{_listeners.Count} active");
         
         // Display rate limit status
         if (_rateLimiter != null)
@@ -1201,7 +1904,40 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             _settingsUpdated = false;
         }
 
+        var autoBuy = Settings.AutoBuy.Value;
+        ImGui.Checkbox("Auto Buy", ref autoBuy);
+        if (ImGui.IsItemDeactivatedAfterEdit() && !_settingsUpdated)
+        {
+            Settings.AutoBuy.Value = autoBuy;
+            _settingsUpdated = true;
+            LogMessage($"Auto Buy setting changed to: {autoBuy}");
+        }
+        if (!ImGui.IsItemActive())
+        {
+            _settingsUpdated = false;
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Automatically perform Ctrl+Left Click after moving mouse to item location");
+        }
+
         ImGui.Separator();
+        
+        // EMERGENCY CONTROLS
+        if (JewYourItem._emergencyShutdown)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(1.0f, 0.0f, 0.0f, 1.0f));
+            ImGui.Text("🚨🚨🚨 EMERGENCY SHUTDOWN ACTIVE 🚨🚨🚨");
+            if (ImGui.Button("RESET EMERGENCY SHUTDOWN"))
+            {
+                JewYourItem._emergencyShutdown = false;
+                JewYourItem._globalConnectionAttempts = 0;
+                LogMessage("Emergency shutdown reset by user");
+            }
+            ImGui.PopStyleColor(1);
+            ImGui.Separator();
+        }
+        
         if (ImGui.Button("Show Rate Limit Status"))
         {
             if (_rateLimiter != null)
@@ -1212,10 +1948,30 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             {
                 LogMessage("Rate limiter not initialized yet.");
             }
+            LogMessage($"Global connection attempts: {JewYourItem._globalConnectionAttempts}");
         }
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("Display current rate limit status in the console");
+        }
+
+        ImGui.Separator();
+        if (ImGui.Button("Test Move Mouse to Recent Item"))
+        {
+            if (_recentItems.Count > 0)
+            {
+                var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                LogMessage($"Testing move mouse to recent item: {name} at ({x}, {y})");
+                MoveMouseToItemLocation(x, y);
+            }
+            else
+            {
+                LogMessage("No recent items available for mouse movement test");
+            }
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Test moving mouse to the most recent item (requires purchase window to be open). Will also test Auto Buy if enabled.");
         }
 
         base.DrawSettings();
