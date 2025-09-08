@@ -579,6 +579,13 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 JewYourItem._globalConnectionAttempts = 0;
             }
             
+            // Reset emergency shutdown on settings change (user is actively configuring)
+            if (JewYourItem._emergencyShutdown)
+            {
+                LogMessage($"🔄 EMERGENCY RESET: Settings changed - clearing emergency shutdown state");
+                JewYourItem._emergencyShutdown = false;
+            }
+            
             // IMMEDIATE CLEANUP: Remove duplicates and disabled listeners first
             var currentListenerIds = _listeners.Select(l => $"{l.Config.League.Value}|{l.Config.SearchId.Value}").ToList();
             LogMessage($"🔍 CURRENT LISTENERS: {string.Join(", ", currentListenerIds)}");

@@ -185,6 +185,9 @@ public partial class JewYourItem
                 _logMessage($"🔌 CONNECTING: {Config.SearchId.Value} to {url}");
                 await WebSocket.ConnectAsync(new Uri(url), Cts.Token);
 
+                // Only increment global counter AFTER successful connection
+                JewYourItem._globalConnectionAttempts++;
+
                 lock (_connectionLock)
                 {
                     IsConnecting = false;
