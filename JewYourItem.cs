@@ -1261,6 +1261,13 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     private async void TravelToHideout()
     {
+        // CRITICAL: Respect plugin enable state
+        if (!Settings.Enable.Value)
+        {
+            LogMessage("🛑 Teleport blocked: Plugin is disabled");
+            return;
+        }
+
         if (!this.GameController.Area.CurrentArea.IsHideout)
         {
             LogMessage("Teleport skipped: Not in hideout zone.");
@@ -1373,6 +1380,13 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     public async Task PerformCtrlLeftClickAsync()
     {
+        // CRITICAL: Respect plugin enable state
+        if (!Settings.Enable.Value)
+        {
+            LogMessage("🛑 Auto buy blocked: Plugin is disabled");
+            return;
+        }
+
         try
         {
             LogMessage("🖱️ AUTO BUY: Performing Ctrl+Left Click...");
@@ -1411,6 +1425,13 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     private async void MoveMouseToItemLocation(int x, int y)
     {
+        // CRITICAL: Respect plugin enable state
+        if (!Settings.Enable.Value)
+        {
+            LogMessage("🛑 Mouse movement blocked: Plugin is disabled");
+            return;
+        }
+
         try
         {
             var purchaseWindow = GameController.IngameState.IngameUi.PurchaseWindowHideout;
@@ -1518,24 +1539,27 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         // CRITICAL: Throttle listener management to prevent rapid execution
         if ((DateTime.Now - _lastTickProcessTime).TotalSeconds < 2)
         {
-            // Only process hotkeys and basic functionality, skip listener management
-            bool hotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
-            if (hotkeyState && !_lastHotkeyState)
+            // ONLY process basic functionality IF plugin is enabled
+            if (Settings.Enable.Value)
             {
-                LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
-                TravelToHideout();
-            }
-            _lastHotkeyState = hotkeyState;
+                bool hotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
+                if (hotkeyState && !_lastHotkeyState)
+                {
+                    LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
+                    TravelToHideout();
+                }
+                _lastHotkeyState = hotkeyState;
 
-            // Check if purchase window just became visible and move mouse to recent item
-            bool purchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
-            if (purchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _recentItems.Count > 0)
-            {
-                LogMessage("Purchase window opened - moving mouse to most recent item");
-                var (name, price, hideoutToken, x, y) = _recentItems.Peek();
-                MoveMouseToItemLocation(x, y);
+                // Check if purchase window just became visible and move mouse to recent item
+                bool purchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
+                if (purchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _recentItems.Count > 0)
+                {
+                    LogMessage("Purchase window opened - moving mouse to most recent item");
+                    var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                    MoveMouseToItemLocation(x, y);
+                }
+                _lastPurchaseWindowVisible = purchaseWindowVisible;
             }
-            _lastPurchaseWindowVisible = purchaseWindowVisible;
             return; // Skip listener management
         }
 
@@ -1544,28 +1568,34 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         {
             LogMessage($"🌍 AREA CHANGE COOLDOWN: Skipping listener management for {10 - (DateTime.Now - _lastAreaChangeTime).TotalSeconds:F1}s after area change");
             
-            // Still process hotkeys and basic functionality
-            bool areaChangeHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
-            if (areaChangeHotkeyState && !_lastHotkeyState)
+            // ONLY process basic functionality IF plugin is enabled
+            if (Settings.Enable.Value)
             {
-                LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
-                TravelToHideout();
-            }
-            _lastHotkeyState = areaChangeHotkeyState;
+                bool areaChangeHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
+                if (areaChangeHotkeyState && !_lastHotkeyState)
+                {
+                    LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
+                    TravelToHideout();
+                }
+                _lastHotkeyState = areaChangeHotkeyState;
 
-            bool areaChangePurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
-            if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _recentItems.Count > 0)
-            {
-                LogMessage("Purchase window opened - moving mouse to most recent item");
-                var (name, price, hideoutToken, x, y) = _recentItems.Peek();
-                MoveMouseToItemLocation(x, y);
+                bool areaChangePurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
+                if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _recentItems.Count > 0)
+                {
+                    LogMessage("Purchase window opened - moving mouse to most recent item");
+                    var (name, price, hideoutToken, x, y) = _recentItems.Peek();
+                    MoveMouseToItemLocation(x, y);
+                }
+                _lastPurchaseWindowVisible = areaChangePurchaseWindowVisible;
             }
-            _lastPurchaseWindowVisible = areaChangePurchaseWindowVisible;
             return;
         }
 
         _lastTickProcessTime = DateTime.Now;
         LogMessage("🔄 TICK: Processing listener management...");
+
+        // CRITICAL: Always check for disabled listeners first
+        StopDisabledListeners();
 
         bool currentHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
         if (currentHotkeyState && !_lastHotkeyState)
@@ -1609,15 +1639,35 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             LogMessage("Active search configuration changed, refreshing listeners...");
         }
 
-        // Stop listeners for disabled searches
+        // CRITICAL: Stop listeners for disabled searches (includes disabled groups and searches)
         foreach (var listener in _listeners.ToList())
         {
             var listenerId = $"{listener.Config.League.Value}|{listener.Config.SearchId.Value}";
-            if (!activeConfigIds.Contains(listenerId))
+            
+            // Check if the search itself is disabled OR its parent group is disabled
+            bool searchStillActive = false;
+            foreach (var group in Settings.Groups)
+            {
+                if (!group.Enable.Value) continue; // Group disabled - skip all its searches
+                
+                foreach (var search in group.Searches)
+                {
+                    if (search.Enable.Value && 
+                        search.League.Value == listener.Config.League.Value && 
+                        search.SearchId.Value == listener.Config.SearchId.Value)
+                    {
+                        searchStillActive = true;
+                        break;
+                    }
+                }
+                if (searchStillActive) break;
+            }
+            
+            if (!searchStillActive || !activeConfigIds.Contains(listenerId))
             {
                 listener.Stop();
                 _listeners.Remove(listener);
-                LogMessage($"Stopped listener for disabled search: {listener.Config.SearchId.Value}");
+                LogMessage($"🛑 DISABLED: Stopped listener for disabled search/group: {listener.Config.SearchId.Value}");
             }
             else if (!listener.IsRunning && !listener.IsConnecting)
             {
@@ -1707,6 +1757,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     public override void Render()
     {
+        // CRITICAL: Respect plugin enable state for ALL rendering
         if (!Settings.Enable.Value || !Settings.ShowGui.Value) return;
 
         ImGui.SetNextWindowPos(Settings.WindowPosition);
@@ -1788,14 +1839,47 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     private void ForceStopAll()
     {
-        LogMessage("Force stopping all listeners due to settings change...");
+        LogMessage("🚨 FORCE STOPPING: All listeners due to plugin disable...");
         foreach (var listener in _listeners.ToList())
         {
             listener.Stop();
             _listeners.Remove(listener);
         }
         _recentItems.Clear();
-        LogMessage("All listeners force stopped.");
+        LogMessage("✅ All listeners force stopped - plugin fully disabled.");
+    }
+
+    private void StopDisabledListeners()
+    {
+        LogMessage("🔍 CHECKING: Stopping listeners for disabled groups/searches...");
+        foreach (var listener in _listeners.ToList())
+        {
+            // Check if the search itself is disabled OR its parent group is disabled
+            bool searchStillActive = false;
+            foreach (var group in Settings.Groups)
+            {
+                if (!group.Enable.Value) continue; // Group disabled - skip all its searches
+                
+                foreach (var search in group.Searches)
+                {
+                    if (search.Enable.Value && 
+                        search.League.Value == listener.Config.League.Value && 
+                        search.SearchId.Value == listener.Config.SearchId.Value)
+                    {
+                        searchStillActive = true;
+                        break;
+                    }
+                }
+                if (searchStillActive) break;
+            }
+            
+            if (!searchStillActive)
+            {
+                listener.Stop();
+                _listeners.Remove(listener);
+                LogMessage($"🛑 DISABLED: Stopped listener for disabled search/group: {listener.Config.SearchId.Value}");
+            }
+        }
     }
 
     public void OnPluginDestroy()
