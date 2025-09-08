@@ -128,6 +128,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     // Purchase window state tracking to prevent accidental purchases
     private bool _allowMouseMovement = true;
     private bool _windowWasClosedSinceLastMovement = true;
+    private bool _mouseMovementLogged = false;
 
     public override bool Initialise()
     {
@@ -272,6 +273,64 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             }
         }
 
+        // CRITICAL: Mouse movement logic runs every tick for instant response
+        // This must be outside any throttling to ensure immediate mouse movement
+        if (Settings.Enable.Value)
+        {
+            bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
+            bool isGameLoading = GameController.IsLoading;
+            
+            // Track when purchase window closes or game starts loading
+            if (!currentPurchaseWindowVisible && _lastPurchaseWindowVisible)
+            {
+                LogMessage($"🚪 PURCHASE WINDOW CLOSED: Ready to move mouse on next window open. HasLocation: {_teleportedItemLocation.HasValue}");
+            }
+            else if (isGameLoading && _teleportedItemLocation.HasValue)
+            {
+                LogMessage($"⏳ GAME LOADING: Ready to move mouse on next window open. HasLocation: {_teleportedItemLocation.HasValue}");
+            }
+            
+            // Move mouse when purchase window is open and we have a teleported item
+            if (currentPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _teleportedItemLocation.HasValue)
+            {
+                // Check if this is a new window opening or if we have a new teleported item
+                bool isNewWindowOpen = !_lastPurchaseWindowVisible;
+                
+                if (!_mouseMovementLogged)
+                {
+                    if (isNewWindowOpen)
+                    {
+                        LogMessage($"🖱️ PURCHASE WINDOW OPENED: MoveMouseToItem = {Settings.MoveMouseToItem.Value}");
+                    }
+                    else
+                    {
+                        LogMessage($"🖱️ PURCHASE WINDOW ALREADY OPEN: Moving mouse to new teleported item");
+                    }
+                    
+                    LogInfo($"🎯 MOUSE MOVE: Moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                    _mouseMovementLogged = true;
+                }
+                
+                MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                _teleportedItemLocation = null; // Clear after successful mouse movement
+                _mouseMovementLogged = false; // Reset for next item
+            }
+            else if (currentPurchaseWindowVisible && Settings.MoveMouseToItem.Value && !_teleportedItemLocation.HasValue)
+            {
+                LogDebug($"🎯 MOUSE MOVE SKIPPED: Purchase window open but no teleported item location available");
+            }
+            else if (!currentPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _teleportedItemLocation.HasValue)
+            {
+                LogDebug($"🎯 MOUSE MOVE WAITING: Purchase window closed, waiting for it to open to move mouse to ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+            }
+            else if (!Settings.MoveMouseToItem.Value)
+            {
+                LogDebug($"🎯 MOUSE MOVE DISABLED: MoveMouseToItem setting is disabled");
+            }
+            
+            _lastPurchaseWindowVisible = currentPurchaseWindowVisible;
+        }
+
         // CRITICAL: Throttle listener management EXCEPT for immediate settings changes
         bool recentSettingsChange = (DateTime.Now - _lastSettingsChangeTime).TotalSeconds < 1;
         if ((DateTime.Now - _lastTickProcessTime).TotalSeconds < 2 && !recentSettingsChange)
@@ -286,20 +345,8 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     TravelToHideout(isManual: true);
                 }
                 _lastHotkeyState = hotkeyState;
-
-                // Check if purchase window just became visible and move mouse to teleported item
-                bool purchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
-                
-                // Track window close events (throttled)
-                if (!purchaseWindowVisible && _lastPurchaseWindowVisible)
-                {
-                    LogDebug("🚪 PURCHASE WINDOW CLOSED (Throttled): Mouse movement will be allowed on next window open");
-                    _windowWasClosedSinceLastMovement = true;
-                    _allowMouseMovement = true;
-                }
-                
-                _lastPurchaseWindowVisible = purchaseWindowVisible;
             }
+            // NOTE: Mouse movement logic moved outside throttling for instant response
             return; // Skip listener management
         }
 
@@ -382,53 +429,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         }
         _lastStopAllState = currentStopAllState;
 
-        // Mouse movement logic: Move mouse when purchase window is open and we have a teleported item
-        bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
-        bool isGameLoading = GameController.IsLoading;
-        
-        // Track when purchase window closes or game starts loading
-        if (!currentPurchaseWindowVisible && _lastPurchaseWindowVisible)
-        {
-            LogMessage($"🚪 PURCHASE WINDOW CLOSED: Ready to move mouse on next window open. HasLocation: {_teleportedItemLocation.HasValue}");
-        }
-        else if (isGameLoading && _teleportedItemLocation.HasValue)
-        {
-            LogMessage($"⏳ GAME LOADING: Ready to move mouse on next window open. HasLocation: {_teleportedItemLocation.HasValue}");
-        }
-        
-        // Move mouse when purchase window is open and we have a teleported item
-        if (currentPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _teleportedItemLocation.HasValue)
-        {
-            // Check if this is a new window opening or if we have a new teleported item
-            bool isNewWindowOpen = !_lastPurchaseWindowVisible;
-            
-            if (isNewWindowOpen)
-            {
-                LogMessage($"🖱️ PURCHASE WINDOW OPENED: MoveMouseToItem = {Settings.MoveMouseToItem.Value}");
-            }
-            else
-            {
-                LogMessage($"🖱️ PURCHASE WINDOW ALREADY OPEN: Moving mouse to new teleported item");
-            }
-            
-            LogInfo($"🎯 MOUSE MOVE: Moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
-            MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
-            _teleportedItemLocation = null; // Clear after successful mouse movement
-        }
-        else if (currentPurchaseWindowVisible && Settings.MoveMouseToItem.Value && !_teleportedItemLocation.HasValue)
-        {
-            LogDebug($"🎯 MOUSE MOVE SKIPPED: Purchase window open but no teleported item location available");
-        }
-        else if (!currentPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _teleportedItemLocation.HasValue)
-        {
-            LogDebug($"🎯 MOUSE MOVE WAITING: Purchase window closed, waiting for it to open to move mouse to ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
-        }
-        else if (!Settings.MoveMouseToItem.Value)
-        {
-            LogDebug($"🎯 MOUSE MOVE DISABLED: MoveMouseToItem setting is disabled");
-        }
-        
-        _lastPurchaseWindowVisible = currentPurchaseWindowVisible;
+        // Mouse movement logic moved to top of Tick method for instant response
 
         var allConfigs = Settings.Groups
             .Where(g => g.Enable.Value)
