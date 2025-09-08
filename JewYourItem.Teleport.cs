@@ -289,14 +289,15 @@ public partial class JewYourItem
                     LogMessage($"📍 STORED TELEPORT LOCATION: Auto teleport to item at ({currentItem.X}, {currentItem.Y}) for mouse movement");
                 }
                 
-                // INSTANT MOUSE MOVEMENT: Calculate current item position using learned base coordinates
-                if (Settings.MoveMouseToItem.Value && Settings.HasLearnedPurchaseWindow.Value)
+                // INSTANT MOUSE MOVEMENT: Move cursor during loading screen if coordinates have been learned
+                // This happens right after sending the teleport request, before the new hideout loads
+                if (Settings.MoveMouseToItem.Value && Settings.HasLearnedPurchaseWindow.Value && !GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
                 {
                     string tpType = _isManualTeleport ? "manual" : "auto";
-                    LogMessage($"⚡ INSTANT MOUSE MOVE: {tpType} teleport succeeded, calculating position for current item at ({currentItem.X}, {currentItem.Y})");
+                    LogMessage($"⚡ LOADING SCREEN MOUSE MOVE: {tpType} teleport request sent, moving cursor during loading for item at ({currentItem.X}, {currentItem.Y})");
                     MoveMouseToCalculatedPosition(currentItem.X, currentItem.Y);
                 }
-                // Fallback: Move mouse if purchase window is already open (first time learning)
+                // Fallback: Move mouse if purchase window is already open (first time learning or when window was already open)
                 else if (Settings.MoveMouseToItem.Value && GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
                 {
                     string tpType = _isManualTeleport ? "manually" : "auto";
