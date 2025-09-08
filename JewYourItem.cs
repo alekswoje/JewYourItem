@@ -221,7 +221,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         
         // DON'T clear _teleportedItemLocation - we need it to persist until purchase window opens
         LogDebug("🌍 AREA CHANGE: Keeping recent items list intact for user to manage");
-        LogDebug("⏳ TELEPORT DELAY: 1 second delay after area change to allow item purchase");
+        LogDebug("⏳ TELEPORT DELAY: 2 second delay after area change to allow item purchase");
     }
 
 

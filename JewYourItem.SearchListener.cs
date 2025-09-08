@@ -576,11 +576,11 @@ public partial class JewYourItem
                                                     {
                                                         logMessage("🚫 Auto TP skipped: Not in valid game state");
                                                     }
-                                                    // Check for 1-second delay after area change
-                                                    else if ((DateTime.Now - _parent._lastTeleportTime).TotalSeconds < 1.0)
-                                                    {
-                                                        logMessage("⏳ Auto TP skipped: 1 second delay after area change to allow item purchase");
-                                                    }
+                    // Check for 2-second delay after area change
+                    else if ((DateTime.Now - _parent._lastTeleportTime).TotalSeconds < 2.0)
+                    {
+                        logMessage("⏳ Auto TP skipped: 2 second delay after area change to allow item purchase");
+                    }
                                                     else
                                                     {
                                                         _parent.TravelToHideout();
