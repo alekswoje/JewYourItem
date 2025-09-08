@@ -552,15 +552,16 @@ public partial class JewYourItem
                                                 }
                                                 if (_parent.Settings.AutoTp.Value && _parent.GameController.Area.CurrentArea.IsHideout)
                                                 {
-                                                    // Check if TP is locked and if timeout has expired
-                                                    if (_parent._tpLocked && (DateTime.Now - _parent._tpLockedTime).TotalSeconds >= 10)
+                                                    // Check if game is loading before attempting auto TP
+                                                    if (_parent.GameController.IsLoading)
                                                     {
-                                                        logMessage("🔓 TP UNLOCKED: 10-second timeout reached in SearchListener, unlocking TP");
-                                                        _parent._tpLocked = false;
-                                                        _parent._tpLockedTime = DateTime.MinValue;
+                                                        logMessage("⏳ Auto TP skipped: Game is loading");
                                                     }
-                                                    
-                                                    if (!_parent._tpLocked)
+                                                    else if (!_parent.GameController.InGame)
+                                                    {
+                                                        logMessage("🚫 Auto TP skipped: Not in valid game state");
+                                                    }
+                                                    else
                                                     {
                                                         _parent.TravelToHideout();
                                                         lock (_parent._recentItemsLock)
@@ -569,11 +570,6 @@ public partial class JewYourItem
                                                         }
                                                         _parent._lastTpTime = DateTime.Now;
                                                         logMessage("Auto TP executed due to new search result.");
-                                                    }
-                                                    else
-                                                    {
-                                                        double remainingTime = 10 - (DateTime.Now - _parent._tpLockedTime).TotalSeconds;
-                                                        logMessage($"Auto TP skipped: TP locked, waiting for window or timeout ({Math.Max(0, remainingTime):F1}s remaining)");
                                                     }
                                                 }
                                                 // REMOVED: Mouse movement should only happen after manual teleports, not when auto TP is blocked by cooldown

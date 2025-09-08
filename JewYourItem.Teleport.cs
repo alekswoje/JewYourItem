@@ -98,29 +98,20 @@ public partial class JewYourItem
             return;
         }
 
-        // Check dynamic TP lock state - ONLY for auto teleports, manual teleports can always proceed
-        if (_tpLocked && !isManual)
+        // Check if game is loading - prevent teleports during loading screens
+        if (GameController.IsLoading)
         {
-            // Check for timeout (10 seconds)
-            if ((DateTime.Now - _tpLockedTime).TotalSeconds >= 10)
-            {
-                LogDebug("🔓 TP UNLOCKED: 10-second timeout reached, unlocking TP");
-                _tpLocked = false;
-                _tpLockedTime = DateTime.MinValue;
-            }
-            else
-            {
-                double remainingTime = 10 - (DateTime.Now - _tpLockedTime).TotalSeconds;
-                LogDebug($"🔒 TP LOCKED: Auto teleport blocked, waiting for purchase window or timeout ({remainingTime:F1}s remaining)");
-                _isManualTeleport = false; // Reset flag on early return
-                return;
-            }
+            LogDebug("⏳ LOADING SCREEN: Game is loading, skipping teleport for safety");
+            _isManualTeleport = false; // Reset flag on early return
+            return;
         }
         
-        // Manual teleports bypass TP lock
-        if (isManual && _tpLocked)
+        // Check if we're in a valid game state for teleporting
+        if (!GameController.InGame)
         {
-            LogDebug("🎯 MANUAL OVERRIDE: Manual teleport bypassing TP lock");
+            LogDebug("🚫 NOT IN GAME: Not in valid game state for teleporting");
+            _isManualTeleport = false; // Reset flag on early return
+            return;
         }
 
         LogDebug("=== TRAVEL TO HIDEOUT HOTKEY PRESSED ===");
@@ -234,10 +225,8 @@ public partial class JewYourItem
             var response = await _httpClient.SendAsync(request);
             LogDebug($"Response status: {response.StatusCode}");
             
-            // Lock TP immediately after successful request send (before checking response)
-            _tpLocked = true;
-            _tpLockedTime = DateTime.Now;
-            LogDebug("🔒 TP LOCKED: Request sent successfully, locked until window loads or timeout");
+            // Note: No longer using TP lock - using loading screen check instead
+            LogDebug("📡 TELEPORT REQUEST: Sent successfully, waiting for response");
             
             // Handle rate limiting
             if (_rateLimiter != null)
@@ -255,13 +244,7 @@ public partial class JewYourItem
                 var responseContent = await response.Content.ReadAsStringAsync();
                 LogError($"Response content: {responseContent}");
                 
-                // Unlock TP for "item not available" errors - these shouldn't cause a cooldown
-                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-                {
-                    LogDebug("🔓 TP UNLOCKED: Item not available error, no cooldown needed");
-                    _tpLocked = false;
-                    _tpLockedTime = DateTime.MinValue;
-                }
+                // Note: No TP lock to unlock - using loading screen check instead
                 
                 // Remove failed item and try next one if available
                 if (response.StatusCode == System.Net.HttpStatusCode.NotFound || 
@@ -425,13 +408,7 @@ public partial class JewYourItem
             LogError($"Teleport request failed: {ex.Message}");
             LogError($"Exception details: {ex}");
             
-            // Unlock TP if request failed due to exception
-            if (_tpLocked)
-            {
-                LogMessage("🔓 TP UNLOCKED: Request failed with exception, unlocking TP");
-                _tpLocked = false;
-                _tpLockedTime = DateTime.MinValue;
-            }
+            // Note: No TP lock to unlock - using loading screen check instead
             
             _isManualTeleport = false; // Reset flag on exception
         }
@@ -565,12 +542,8 @@ public partial class JewYourItem
                 return;
             }
 
-            // GUI teleports (clicking buttons) are considered manual and bypass TP lock
-            if (_tpLocked)
-            {
-                double remainingTime = 10 - (DateTime.Now - _tpLockedTime).TotalSeconds;
-                LogDebug($"🎯 MANUAL OVERRIDE: GUI teleport bypassing TP lock (would have {remainingTime:F1}s remaining)");
-            }
+            // GUI teleports (clicking buttons) are considered manual
+            LogDebug("🎯 GUI TELEPORT: User clicked teleport button");
 
             LogMessage($"🎯 SPECIFIC ITEM TP: Teleporting to {item.Name} at ({item.X}, {item.Y})");
 

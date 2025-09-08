@@ -121,9 +121,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private (int x, int y)? _teleportedItemLocation = null;
     private bool _isManualTeleport = false;
     
-    // Dynamic TP cooldown state
-    private bool _tpLocked = false;
-    private DateTime _tpLockedTime = DateTime.MinValue;
+    // Note: Removed TP lock system - now using loading screen check instead
     
     // Purchase window state tracking to prevent accidental purchases
     private bool _allowMouseMovement = true;
@@ -254,13 +252,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             return;
         }
 
-        // CRITICAL: Check TP lock timeout to prevent infinite locks
-        if (_tpLocked && (DateTime.Now - _tpLockedTime).TotalSeconds >= 10)
-        {
-            LogDebug("🔓 TP UNLOCKED: 10-second timeout reached in Tick(), unlocking TP");
-            _tpLocked = false;
-            _tpLockedTime = DateTime.MinValue;
-        }
+        // Note: Removed TP lock timeout check - now using loading screen check instead
 
         // Ensure rate limiter is initialized
         if (_rateLimiter == null)
@@ -310,13 +302,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 {
                     LogDebug($"🖱️ PURCHASE WINDOW OPENED (Throttled): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
                     
-                    // Unlock TP when purchase window opens
-                    if (_tpLocked)
-                    {
-                        LogDebug("🔓 TP UNLOCKED (Throttled): Purchase window opened successfully");
-                        _tpLocked = false;
-                        _tpLockedTime = DateTime.MinValue;
-                    }
+                    // Note: No TP lock to unlock - using loading screen check instead
                     
                     // Learn purchase window coordinates for future instant mouse movement
                     if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
@@ -398,13 +384,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 {
                     LogDebug($"🖱️ PURCHASE WINDOW OPENED (Area): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
                     
-                    // Unlock TP when purchase window opens
-                    if (_tpLocked)
-                    {
-                        LogDebug("🔓 TP UNLOCKED (Area): Purchase window opened successfully");
-                        _tpLocked = false;
-                        _tpLockedTime = DateTime.MinValue;
-                    }
+                    // Note: No TP lock to unlock - using loading screen check instead
                     
                     // Learn purchase window coordinates for future instant mouse movement
                     if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
@@ -508,13 +488,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         {
             LogMessage($"🖱️ PURCHASE WINDOW OPENED: MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
             
-            // Unlock TP when purchase window opens
-            if (_tpLocked)
-            {
-                LogDebug("🔓 TP UNLOCKED: Purchase window opened successfully");
-                _tpLocked = false;
-                _tpLockedTime = DateTime.MinValue;
-            }
+            // Note: No TP lock to unlock - using loading screen check instead
             
             // CRITICAL: Move mouse to item after hideout TP when merchant window opens
             // This handles the case where hideout TP was sent but mouse movement was skipped due to open merchant window

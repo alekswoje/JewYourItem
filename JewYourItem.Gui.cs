@@ -43,22 +43,7 @@ public partial class JewYourItem
         ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.1f, 0.1f, 0.1f, 0.8f));
         ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.9f, 0.9f, 0.9f, 1.0f));
 
-        if (Settings.AutoTp.Value && _tpLocked)
-        {
-            float remainingTime = 10 - (float)(DateTime.Now - _tpLockedTime).TotalSeconds;
-            
-            // Check if timeout reached and unlock if needed
-            if (remainingTime <= 0)
-            {
-                LogMessage("🔓 TP UNLOCKED: 10-second timeout reached in display, unlocking TP");
-                _tpLocked = false;
-                _tpLockedTime = DateTime.MinValue;
-            }
-            else
-            {
-                ImGui.Text($"TP Locked: {remainingTime:F1}s");
-            }
-        }
+        // Note: Removed TP lock display - now using loading screen check instead
 
         // Use child windows and proper spacing for better auto-sizing
         if (_listeners.Count > 0)
