@@ -391,25 +391,8 @@ public partial class JewYourItem
                     }
                 }
                 
-                // INSTANT MOUSE MOVEMENT: Move cursor during loading screen if coordinates have been learned
-                // This only works when we have learned coordinates, otherwise we wait for the purchase window
-                if (Settings.MoveMouseToItem.Value && Settings.HasLearnedPurchaseWindow.Value && !GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
-                {
-                    string tpType = _isManualTeleport ? "manual" : "auto";
-                    LogDebug($"⚡ LOADING SCREEN MOUSE MOVE: {tpType} teleport request sent, moving cursor during loading for item at ({currentItem.X}, {currentItem.Y})");
-                    MoveMouseToCalculatedPosition(currentItem.X, currentItem.Y);
-                }
-                // CRITICAL: Do NOT move mouse if purchase window is open during hideout TP
-                // This prevents buying wrong items when hideout TP fails silently
-                else if (Settings.MoveMouseToItem.Value && GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
-                {
-                    LogWarning($"⚠️ MERCHANT WINDOW OPEN: Skipping mouse movement to prevent buying wrong item during hideout TP");
-                    LogDebug($"🛡️ SAFETY: Will move mouse only after merchant window closes and new hideout loads");
-                }
-                else if (Settings.MoveMouseToItem.Value && !Settings.HasLearnedPurchaseWindow.Value)
-                {
-                    LogDebug($"🎓 NO LEARNED COORDINATES: Will learn and move mouse when purchase window opens");
-                }
+                // Note: Mouse movement is now handled in the main Tick method
+                // This allows for better control over when mouse movement occurs
                 
                 lock (_recentItemsLock)
                 {
@@ -525,6 +508,8 @@ public partial class JewYourItem
             int finalX = windowPos.X + itemX;
             int finalY = windowPos.Y + itemY;
             
+            LogDebug($"🎯 CALCULATION DEBUG: Input coords=({x},{y}), Panel=({rect.X},{rect.Y},{rect.Width},{rect.Height}), CellSize=({cellWidth},{cellHeight}), TopLeft=({topLeft.X},{topLeft.Y}), ItemPos=({itemX},{itemY}), Window=({windowPos.X},{windowPos.Y}), Final=({finalX},{finalY})");
+            
             // Move mouse cursor
             System.Windows.Forms.Cursor.Position = new System.Drawing.Point(finalX, finalY);
             
@@ -621,118 +606,7 @@ public partial class JewYourItem
         }
     }
 
-    private void MoveMouseToLearnedPosition()
-    {
-        try
-        {
-            // CRITICAL: Respect plugin enable state
-            if (!Settings.Enable.Value) return;
 
-            int x = Settings.PurchaseWindowX.Value;
-            int y = Settings.PurchaseWindowY.Value;
-
-            // Move mouse to learned coordinates instantly
-            mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 
-                       (uint)((x * 65535) / GetSystemMetrics(SM_CXSCREEN)), 
-                       (uint)((y * 65535) / GetSystemMetrics(SM_CYSCREEN)), 0, 0);
-
-            LogDebug($"⚡ MOVED MOUSE TO LEARNED POSITION: Screen({x},{y})");
-
-            // Auto Buy: Wait for purchase window to actually load, then click
-            if (Settings.AutoBuy.Value)
-            {
-                LogInfo("🛒 AUTO BUY: Scheduling click after window loads...");
-                Task.Run(async () =>
-                {
-                    // Wait up to 3 seconds for purchase window to be visible
-                    for (int i = 0; i < 30; i++) // 30 * 100ms = 3 seconds
-                    {
-                        if (GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
-                        {
-                            await Task.Delay(100); // Small delay to ensure window is fully loaded
-                            await PerformCtrlLeftClickAsync();
-                            LogInfo("🛒 AUTO BUY: Executed click after window loaded");
-                            return;
-                        }
-                        await Task.Delay(100);
-                    }
-                    LogMessage("⚠️ AUTO BUY: Timeout waiting for purchase window to load");
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            LogError($"Failed to move mouse to learned position: {ex.Message}");
-        }
-    }
-
-    private void MoveMouseToCalculatedPosition(int stashX, int stashY)
-    {
-        try
-        {
-            // CRITICAL: Respect plugin enable state
-            if (!Settings.Enable.Value) return;
-
-            // Check if we have learned panel dimensions
-            if (Settings.PanelWidth.Value <= 0 || Settings.PanelHeight.Value <= 0)
-            {
-                // Fallback to stored learned position if we don't have panel dimensions yet
-                int fallbackX = Settings.PurchaseWindowX.Value;
-                int fallbackY = Settings.PurchaseWindowY.Value;
-                
-                mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 
-                           (uint)((fallbackX * 65535) / GetSystemMetrics(SM_CXSCREEN)), 
-                           (uint)((fallbackY * 65535) / GetSystemMetrics(SM_CYSCREEN)), 0, 0);
-
-                LogDebug($"⚡ MOVED MOUSE TO CALCULATED POSITION: Stash({stashX},{stashY}) -> Screen({fallbackX},{fallbackY}) [Using fallback learned position]");
-            }
-            else
-            {
-                // Calculate the actual position using stored panel dimensions
-                float cellWidth = (float)Settings.PanelWidth.Value / 12f;
-                float cellHeight = (float)Settings.PanelHeight.Value / 12f;
-                int screenX = (int)(Settings.PanelLeft.Value + (stashX * cellWidth) + (cellWidth * 7 / 8));
-                int screenY = (int)(Settings.PanelTop.Value + (stashY * cellHeight) + (cellHeight * 7 / 8));
-
-                // Move mouse to calculated coordinates instantly
-                mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 
-                           (uint)((screenX * 65535) / GetSystemMetrics(SM_CXSCREEN)), 
-                           (uint)((screenY * 65535) / GetSystemMetrics(SM_CYSCREEN)), 0, 0);
-
-                LogDebug($"⚡ MOVED MOUSE TO CALCULATED POSITION: Stash({stashX},{stashY}) -> Screen({screenX},{screenY}) [Calculated from panel dimensions]");
-            }
-
-            // If Auto Buy is enabled, wait for purchase window to be visible before clicking
-            if (Settings.AutoBuy.Value)
-            {
-                LogInfo("🛒 AUTO BUY: Waiting for purchase window to be visible before clicking...");
-                Task.Run(async () =>
-                {
-                    // Wait up to 10 seconds for purchase window to become visible
-                    int attempts = 0;
-                    while (attempts < 100 && !GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
-                    {
-                        await Task.Delay(100);
-                        attempts++;
-                    }
-
-                    if (GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
-                    {
-                        LogInfo("🛒 AUTO BUY: Purchase window visible, performing Ctrl+Left click...");
-                        await PerformCtrlLeftClickAsync();
-                    }
-                    else
-                    {
-                        LogInfo("🛒 AUTO BUY: Timeout waiting for purchase window to become visible");
-                    }
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            LogError($"❌ MOVE MOUSE TO CALCULATED POSITION FAILED: {ex.Message}");
-        }
-    }
 
     public async Task PlaySoundWithNAudio(string soundPath, Action<string> logMessage, Action<string> logError)
     {

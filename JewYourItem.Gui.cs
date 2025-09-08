@@ -378,28 +378,6 @@ public partial class JewYourItem
             _settingsUpdated = false;
         }
 
-        // Purchase window coordinate learning status and reset
-        if (Settings.HasLearnedPurchaseWindow.Value)
-        {
-            ImGui.Text($"📍 Learned coordinates: ({Settings.PurchaseWindowX.Value}, {Settings.PurchaseWindowY.Value})");
-            if (ImGui.Button("🔄 Reset Learned Coordinates"))
-            {
-                Settings.HasLearnedPurchaseWindow.Value = false;
-                Settings.PurchaseWindowX.Value = 0;
-                Settings.PurchaseWindowY.Value = 0;
-                Settings.PanelLeft.Value = 0;
-                Settings.PanelTop.Value = 0;
-                Settings.PanelWidth.Value = 0;
-                Settings.PanelHeight.Value = 0;
-                Settings.LearnedStashX.Value = 0;
-                Settings.LearnedStashY.Value = 0;
-                LogMessage("🔄 RESET: Cleared learned purchase window coordinates and panel dimensions - will learn again on next TP");
-            }
-        }
-        else
-        {
-            ImGui.Text("📍 Coordinates: Not learned yet (will learn on first TP)");
-        }
 
         var autoBuy = Settings.AutoBuy.Value;
         ImGui.Checkbox("Auto Buy", ref autoBuy);
@@ -516,41 +494,4 @@ public partial class JewYourItem
         base.DrawSettings();
     }
 
-    private void LearnPurchaseWindowCoordinates(int stashX, int stashY)
-    {
-        try
-        {
-            var purchaseWindow = GameController.IngameState.IngameUi.PurchaseWindowHideout;
-            if (!purchaseWindow.IsVisible) return;
-
-            var stashPanel = purchaseWindow.TabContainer.StashInventoryPanel;
-            if (stashPanel == null) return;
-
-            var rect = stashPanel.GetClientRectCache;
-            if (rect.Width <= 0 || rect.Height <= 0) return;
-
-            // Calculate screen coordinates for the stash position (bottom-right to avoid sockets)
-            float cellWidth = rect.Width / 12f;
-            float cellHeight = rect.Height / 12f;
-            int screenX = (int)(rect.Left + (stashX * cellWidth) + (cellWidth * 7 / 8));
-            int screenY = (int)(rect.Top + (stashY * cellHeight) + (cellHeight * 7 / 8));
-
-            // Store the learned coordinates AND panel dimensions for future calculations
-            Settings.PurchaseWindowX.Value = screenX;
-            Settings.PurchaseWindowY.Value = screenY;
-            Settings.PanelLeft.Value = (int)rect.Left;
-            Settings.PanelTop.Value = (int)rect.Top;
-            Settings.PanelWidth.Value = (int)rect.Width;
-            Settings.PanelHeight.Value = (int)rect.Height;
-            Settings.LearnedStashX.Value = stashX;
-            Settings.LearnedStashY.Value = stashY;
-            Settings.HasLearnedPurchaseWindow.Value = true;
-
-            LogMessage($"🎓 LEARNED PURCHASE WINDOW: Stash({stashX},{stashY}) -> Screen({screenX},{screenY}) - Panel({rect.Left},{rect.Top},{rect.Width},{rect.Height}) - Stored for calculations");
-        }
-        catch (Exception ex)
-        {
-            LogError($"Failed to learn purchase window coordinates: {ex.Message}");
-        }
-    }
 }

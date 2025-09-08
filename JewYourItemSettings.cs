@@ -52,25 +52,6 @@ public class JewYourItemSettings : ISettings
     public RangeNode<int> MaxRecentItems { get; set; } = new RangeNode<int>(5, 1, 20);
     public Vector2 WindowPosition { get; set; } = new Vector2(10, 800);
     
-    // Purchase window coordinates and dimensions for instant mouse movement - hidden from UI, only used internally
-    [IgnoreMenu]
-    public RangeNode<int> PurchaseWindowX { get; set; } = new RangeNode<int>(0, 0, 3840);
-    [IgnoreMenu]
-    public RangeNode<int> PurchaseWindowY { get; set; } = new RangeNode<int>(0, 0, 2160);
-    [IgnoreMenu]
-    public RangeNode<int> PanelLeft { get; set; } = new RangeNode<int>(0, 0, 3840);
-    [IgnoreMenu]
-    public RangeNode<int> PanelTop { get; set; } = new RangeNode<int>(0, 0, 2160);
-    [IgnoreMenu]
-    public RangeNode<int> PanelWidth { get; set; } = new RangeNode<int>(0, 0, 3840);
-    [IgnoreMenu]
-    public RangeNode<int> PanelHeight { get; set; } = new RangeNode<int>(0, 0, 2160);
-    [IgnoreMenu]
-    public RangeNode<int> LearnedStashX { get; set; } = new RangeNode<int>(0, 0, 11);
-    [IgnoreMenu]
-    public RangeNode<int> LearnedStashY { get; set; } = new RangeNode<int>(0, 0, 11);
-    [IgnoreMenu]
-    public ToggleNode HasLearnedPurchaseWindow { get; set; } = new ToggleNode(false);
     public List<SearchGroup> Groups { get; set; } = new List<SearchGroup>();
     [JsonIgnore]
     public GroupsRenderer GroupsConfig { get; set; }
