@@ -17,6 +17,7 @@ using System.Net.Http;
 using System.IO;
 using System.Net;
 using System.IO.Compression;
+using NAudio.Wave;
 using System.Media;
 using System.Windows.Forms;
 using System.Text.RegularExpressions;
@@ -543,6 +544,8 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private static bool _emergencyShutdown = false;
     private DateTime _lastTickProcessTime = DateTime.MinValue;
     private DateTime _lastAreaChangeTime = DateTime.MinValue;
+    private DateTime _lastSettingsChangeTime = DateTime.MinValue;
+    private bool _areaChangeCooldownLogged = false;
 
     public override bool Initialise()
     {
@@ -792,7 +795,8 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         private async Task ReceiveMessagesAsync(Action<string> logMessage, Action<string> logError, string sessionId)
         {
             var buffer = new byte[1024 * 4];
-            while (WebSocket.State == WebSocketState.Open && !Cts.Token.IsCancellationRequested)
+            // CRITICAL: Add null checks to prevent crashes during cleanup
+            while (WebSocket != null && WebSocket.State == WebSocketState.Open && Cts != null && !Cts.Token.IsCancellationRequested)
             {
                 try
                 {
@@ -1044,7 +1048,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                                     if (soundPath != null)
                                                     {
                                                         logMessage("Playing sound file...");
-                                                        new SoundPlayer(soundPath).Play();
+                                                        await _parent.PlaySoundWithNAudio(soundPath, logMessage, logError);
                                                         logMessage("Sound played successfully!");
                                                     }
                                                     else
@@ -1156,41 +1160,51 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 {
                     try
                     {
-                        if (WebSocket.State == WebSocketState.Open)
+                        var webSocketToClose = WebSocket;
+                        WebSocket = null; // Set to null immediately to prevent race conditions
+                        
+                        if (webSocketToClose.State == WebSocketState.Open)
                         {
                             // Use Task.Run to avoid blocking the main thread
                             Task.Run(async () =>
                             {
                                 try
                                 {
-                                    await WebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Plugin stopped", CancellationToken.None);
+                                    await webSocketToClose.CloseAsync(WebSocketCloseStatus.NormalClosure, "Plugin stopped", CancellationToken.None);
                                 }
                                 catch (Exception ex)
                                 {
-                                    _logError($"Error closing WebSocket: {ex.Message}");
+                                    _logError($"Error closing WebSocket for {Config.SearchId.Value}: {ex.Message}");
                                 }
                                 finally
                                 {
                                     try
                                     {
-                                        WebSocket.Dispose();
+                                        webSocketToClose.Dispose();
                                     }
-                                    catch { /* Ignore disposal errors */ }
+                                    catch (Exception ex)
+                                    {
+                                        _logError($"Error disposing WebSocket for {Config.SearchId.Value}: {ex.Message}");
+                                    }
                                 }
                             });
                         }
                         else
                         {
-                            WebSocket.Dispose();
+                            try
+                            {
+                                webSocketToClose.Dispose();
+                            }
+                            catch (Exception ex)
+                            {
+                                _logError($"Error disposing WebSocket for {Config.SearchId.Value}: {ex.Message}");
+                            }
                         }
                     }
                     catch (Exception ex)
                     {
-                        _logError($"Error during WebSocket cleanup: {ex.Message}");
-                    }
-                    finally
-                    {
-                        WebSocket = null;
+                        _logError($"Error during WebSocket cleanup for {Config.SearchId.Value}: {ex.Message}");
+                        WebSocket = null; // Ensure it's null even if cleanup fails
                     }
                 }
                 
@@ -1351,13 +1365,28 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             
             if (!response.IsSuccessStatusCode)
             {
-                // Rate limiting is now handled above
                 LogError($"Teleport failed: {response.StatusCode}");
                 var responseContent = response.Content.ReadAsStringAsync().Result;
                 LogError($"Response content: {responseContent}");
-                if (response.StatusCode == System.Net.HttpStatusCode.BadRequest && responseContent.Contains("Invalid query"))
+                
+                // Remove failed item and try next one if available
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound || 
+                    response.StatusCode == System.Net.HttpStatusCode.BadRequest)
                 {
+                    LogMessage($"🗑️ ITEM EXPIRED: Removing expired item '{name}' and trying next...");
                     _recentItems.Dequeue();
+                    
+                    // Try the next item if available
+                    if (_recentItems.Count > 0)
+                    {
+                        LogMessage($"🔄 RETRY: Attempting teleport to next item ({_recentItems.Count} remaining)");
+                        await Task.Delay(500); // Small delay before retry
+                        TravelToHideout(); // Recursive call to try next item
+                    }
+                    else
+                    {
+                        LogMessage("📭 NO MORE ITEMS: All items in queue have expired");
+                    }
                 }
             }
             else
@@ -1502,8 +1531,58 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         LogMessage("📦 Cleared recent items due to area change");
     }
 
+    public async Task PlaySoundWithNAudio(string soundPath, Action<string> logMessage, Action<string> logError)
+    {
+        try
+        {
+            // Use Task.Run to avoid blocking the UI thread
+            await Task.Run(() =>
+            {
+                using (var audioFile = new AudioFileReader(soundPath))
+                using (var outputDevice = new WaveOutEvent())
+                {
+                    outputDevice.Init(audioFile);
+                    outputDevice.Play();
+                    
+                    // Wait for playback to complete
+                    while (outputDevice.PlaybackState == PlaybackState.Playing)
+                    {
+                        Thread.Sleep(100);
+                    }
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            logError($"NAudio playback failed: {ex.Message}");
+            
+            // Fallback to System.Media.SoundPlayer if NAudio fails
+            try
+            {
+                logMessage("Attempting fallback to System.Media.SoundPlayer...");
+                using (var player = new System.Media.SoundPlayer(soundPath))
+                {
+                    player.Play();
+                }
+                logMessage("Fallback audio playback successful");
+            }
+            catch (Exception fallbackEx)
+            {
+                logError($"Fallback audio playback also failed: {fallbackEx.Message}");
+            }
+        }
+    }
+
     public override async void Tick()
     {
+        // CRITICAL: IMMEDIATE PLUGIN DISABLE CHECK - HIGHEST PRIORITY
+        if (!Settings.Enable.Value)
+        {
+            LogMessage("🛑 PLUGIN DISABLED: Stopping all listeners immediately");
+            ForceStopAll();
+            return;
+        }
+
         // EMERGENCY SHUTDOWN CHECK
         if (JewYourItem._emergencyShutdown)
         {
@@ -1525,19 +1604,15 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             _lastEnableState = Settings.Enable.Value;
             if (!Settings.Enable.Value)
             {
+                LogMessage("🛑 PLUGIN JUST DISABLED: Force stopping all listeners");
                 ForceStopAll();
                 return;
             }
         }
 
-        if (!Settings.Enable.Value)
-        {
-            StopAll();
-            return;
-        }
-
-        // CRITICAL: Throttle listener management to prevent rapid execution
-        if ((DateTime.Now - _lastTickProcessTime).TotalSeconds < 2)
+        // CRITICAL: Throttle listener management EXCEPT for immediate settings changes
+        bool recentSettingsChange = (DateTime.Now - _lastSettingsChangeTime).TotalSeconds < 1;
+        if ((DateTime.Now - _lastTickProcessTime).TotalSeconds < 2 && !recentSettingsChange)
         {
             // ONLY process basic functionality IF plugin is enabled
             if (Settings.Enable.Value)
@@ -1563,10 +1638,16 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             return; // Skip listener management
         }
 
-        // AREA CHANGE PROTECTION: Don't recreate listeners immediately after area change
-        if ((DateTime.Now - _lastAreaChangeTime).TotalSeconds < 10)
+        // AREA CHANGE PROTECTION: Reduced delay, can be overridden by settings changes
+        bool recentAreaChange = (DateTime.Now - _lastAreaChangeTime).TotalSeconds < 5; // Reduced from 10 to 5 seconds
+        if (recentAreaChange && !recentSettingsChange)
         {
-            LogMessage($"🌍 AREA CHANGE COOLDOWN: Skipping listener management for {10 - (DateTime.Now - _lastAreaChangeTime).TotalSeconds:F1}s after area change");
+            // Only log once to avoid spam
+            if (!_areaChangeCooldownLogged)
+            {
+                LogMessage($"🌍 AREA CHANGE COOLDOWN: Skipping listener management for 5s after area change (can be overridden by settings changes)");
+                _areaChangeCooldownLogged = true;
+            }
             
             // ONLY process basic functionality IF plugin is enabled
             if (Settings.Enable.Value)
@@ -1590,12 +1671,21 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             }
             return;
         }
+        else if (!recentAreaChange)
+        {
+            // Reset the logging flag when cooldown is over
+            _areaChangeCooldownLogged = false;
+        }
 
         _lastTickProcessTime = DateTime.Now;
-        LogMessage("🔄 TICK: Processing listener management...");
-
-        // CRITICAL: Always check for disabled listeners first
-        StopDisabledListeners();
+        if (recentSettingsChange)
+        {
+            LogMessage("🔄 TICK: Processing listener management (INSTANT - settings changed)...");
+        }
+        else
+        {
+            LogMessage("🔄 TICK: Processing listener management...");
+        }
 
         bool currentHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
         if (currentHotkeyState && !_lastHotkeyState)
@@ -1633,10 +1723,45 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
         // Check if the active configs have changed (for immediate response to settings changes)
         var currentConfigsHash = string.Join("|", activeConfigIds.OrderBy(x => x));
-        if (_lastActiveConfigsHash != currentConfigsHash)
+        bool settingsChanged = _lastActiveConfigsHash != currentConfigsHash;
+        if (settingsChanged)
         {
             _lastActiveConfigsHash = currentConfigsHash;
-            LogMessage("Active search configuration changed, refreshing listeners...");
+            _lastSettingsChangeTime = DateTime.Now;
+            LogMessage($"🔄 SETTINGS CHANGED: Config changed from {_listeners.Count} to {allConfigs.Count} searches - processing immediately");
+            
+            // IMMEDIATE CLEANUP: Remove duplicates and disabled listeners first
+            var currentListenerIds = _listeners.Select(l => $"{l.Config.League.Value}|{l.Config.SearchId.Value}").ToList();
+            LogMessage($"🔍 CURRENT LISTENERS: {string.Join(", ", currentListenerIds)}");
+            LogMessage($"🎯 TARGET CONFIGS: {string.Join(", ", activeConfigIds)}");
+        }
+
+        // CRITICAL: Check for disabled listeners efficiently (avoid redundant processing)
+        if (!settingsChanged)
+        {
+            // Only do full disable check if settings haven't changed (to avoid redundancy)
+            StopDisabledListeners();
+        }
+        else
+        {
+            // When settings changed, do immediate cleanup of duplicates and disabled listeners
+            LogMessage($"🧹 IMMEDIATE CLEANUP: Processing settings change for {allConfigs.Count} target configs");
+            StopDisabledListeners();
+            
+            // Clean up any existing duplicates immediately
+            var duplicateGroups = _listeners.GroupBy(l => $"{l.Config.League.Value}|{l.Config.SearchId.Value}")
+                .Where(g => g.Count() > 1).ToList();
+            
+            foreach (var group in duplicateGroups)
+            {
+                var duplicates = group.Skip(1).ToList();
+                LogMessage($"🚨 SETTINGS CLEANUP: Removing {duplicates.Count} duplicates for {group.Key}");
+                foreach (var duplicate in duplicates)
+                {
+                    duplicate.Stop();
+                    _listeners.Remove(duplicate);
+                }
+            }
         }
 
         // CRITICAL: Stop listeners for disabled searches (includes disabled groups and searches)
@@ -1712,35 +1837,59 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         {
             var configId = $"{config.League.Value}|{config.SearchId.Value}";
             
-            // CRITICAL: Check for existing listeners more thoroughly
-            var existingListener = _listeners.FirstOrDefault(l => 
+            // CRITICAL: Comprehensive duplicate detection
+            var existingListeners = _listeners.Where(l => 
                 l.Config.League.Value == config.League.Value && 
-                l.Config.SearchId.Value == config.SearchId.Value);
+                l.Config.SearchId.Value == config.SearchId.Value).ToList();
+            
+            if (existingListeners.Count > 1)
+            {
+                // REMOVE EXTRA DUPLICATES
+                LogMessage($"🚨 DUPLICATE CLEANUP: Found {existingListeners.Count} listeners for {config.SearchId.Value}, removing {existingListeners.Count - 1} extras");
+                for (int i = 1; i < existingListeners.Count; i++)
+                {
+                    existingListeners[i].Stop();
+                    _listeners.Remove(existingListeners[i]);
+                }
+                LogMessage($"✅ CLEANED UP: Removed {existingListeners.Count - 1} duplicate listeners for {config.SearchId.Value}");
+            }
+            
+            var existingListener = existingListeners.FirstOrDefault();
             
             if (existingListener == null)
             {
-                // DOUBLE-CHECK: Make sure no listener exists for this exact config
-                var duplicateCheck = _listeners.Any(l => 
+                // FINAL CHECK: Ensure absolutely no duplicates
+                var finalDuplicateCheck = _listeners.Any(l => 
                     l.Config.League.Value == config.League.Value && 
                     l.Config.SearchId.Value == config.SearchId.Value);
                 
-                if (duplicateCheck)
+                if (finalDuplicateCheck)
                 {
-                    LogMessage($"🛡️ DUPLICATE PREVENTION: Listener already exists for {config.SearchId.Value}");
+                    LogMessage($"🛡️ FINAL DUPLICATE PREVENTION: Listener already exists for {config.SearchId.Value}");
                     continue;
                 }
                 
-                // EMERGENCY: Prevent rapid creation
-                if (JewYourItem._globalConnectionAttempts >= 2)
+                // EMERGENCY: Prevent rapid creation (but allow user-initiated restarts)
+                if (JewYourItem._globalConnectionAttempts >= 5 && !recentSettingsChange)
                 {
-                    LogMessage($"🚨 EMERGENCY: Preventing new listener creation - global limit reached");
+                    LogMessage($"🚨 EMERGENCY: Preventing new listener creation - global limit reached ({JewYourItem._globalConnectionAttempts} attempts)");
                     continue;
                 }
+                else if (recentSettingsChange && JewYourItem._globalConnectionAttempts >= 2)
+                {
+                    // Reset global attempts for user-initiated changes
+                    LogMessage($"🔄 USER ACTION: Resetting global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) for settings change");
+                    JewYourItem._globalConnectionAttempts = 0;
+                }
                 
-                // Check rate limits before creating new WebSocket
-                if (_rateLimiter != null)
+                // Check rate limits before creating new WebSocket (but allow immediate user actions)
+                if (_rateLimiter != null && !recentSettingsChange)
                 {
                     await _rateLimiter.CheckAndWaitIfNeeded("client");
+                }
+                else if (recentSettingsChange)
+                {
+                    LogMessage($"⚡ INSTANT START: Bypassing rate limit for user-initiated settings change");
                 }
                 
                 var newListener = new SearchListener(this, config, LogMessage, LogError);
@@ -1760,8 +1909,19 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         // CRITICAL: Respect plugin enable state for ALL rendering
         if (!Settings.Enable.Value || !Settings.ShowGui.Value) return;
 
-        ImGui.SetNextWindowPos(Settings.WindowPosition);
-        ImGui.Begin("JewYourItem Results", ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize);
+        // Set window position but allow auto-resizing
+        ImGui.SetNextWindowPos(Settings.WindowPosition, ImGuiCond.FirstUseEver);
+        
+        // Set minimum window size for better appearance
+        ImGui.SetNextWindowSizeConstraints(new Vector2(200, 100), new Vector2(float.MaxValue, float.MaxValue));
+        
+        // Enable auto-resize: Remove NoResize flag and add AlwaysAutoResize
+        ImGui.Begin("JewYourItem Results", ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.AlwaysAutoResize);
+        
+        // Add padding for better text spacing
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(12, 10));
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(8, 4));
+        
         ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.1f, 0.1f, 0.1f, 0.8f));
         ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.9f, 0.9f, 0.9f, 1.0f));
 
@@ -1771,55 +1931,73 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             ImGui.Text($"TP Cooldown: {remainingCooldown:F1}s");
         }
 
-        foreach (var listener in _listeners)
+        // Use child windows and proper spacing for better auto-sizing
+        if (_listeners.Count > 0)
         {
-            string status = "Unknown";
-            if (listener.IsConnecting) status = "🔄 Connecting";
-            else if (listener.IsRunning) status = "✅ Connected";
-            else status = "❌ Disconnected";
+            ImGui.Text("🔍 Search Listeners:");
+            ImGui.Spacing();
             
-            ImGui.Text($"Search {listener.Config.SearchId.Value}: {status}");
-            
-            if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
+            foreach (var listener in _listeners)
             {
-                float remainingCooldown = RestartCooldownSeconds - (float)(DateTime.Now - listener.LastErrorTime).TotalSeconds;
-                ImGui.Text($"  Error Cooldown: {remainingCooldown:F1}s");
+                string status = "Unknown";
+                if (listener.IsConnecting) status = "🔄 Connecting";
+                else if (listener.IsRunning) status = "✅ Connected";
+                else status = "❌ Disconnected";
+                
+                ImGui.BulletText($"{listener.Config.SearchId.Value}: {status}");
+                
+                // Indent additional info
+                if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds ||
+                    (DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 10 ||
+                    listener.ConnectionAttempts > 0)
+                {
+                    ImGui.Indent();
+                    
+                    if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
+                    {
+                        float remainingCooldown = RestartCooldownSeconds - (float)(DateTime.Now - listener.LastErrorTime).TotalSeconds;
+                        ImGui.Text($"⏱️ Error Cooldown: {remainingCooldown:F1}s");
+                    }
+                    
+                    if ((DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 10)
+                    {
+                        float remainingThrottle = 10 - (float)(DateTime.Now - listener.LastConnectionAttempt).TotalSeconds;
+                        ImGui.Text($"⏸️ Throttle: {remainingThrottle:F1}s");
+                    }
+                    
+                    if (listener.ConnectionAttempts > 0)
+                    {
+                        ImGui.Text($"🔄 Attempts: {listener.ConnectionAttempts}");
+                    }
+                    
+                    ImGui.Unindent();
+                }
             }
             
-            if ((DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 10)
-            {
-                float remainingThrottle = 10 - (float)(DateTime.Now - listener.LastConnectionAttempt).TotalSeconds;
-                ImGui.Text($"  Throttle: {remainingThrottle:F1}s");
-            }
-            
-            if (listener.ConnectionAttempts > 0)
-            {
-                ImGui.Text($"  Attempts: {listener.ConnectionAttempts}");
-            }
+            ImGui.Spacing();
+            ImGui.Text($"📊 Status: {_listeners.Count(l => l.IsRunning)}/{_listeners.Count} active");
         }
-
-        ImGui.Text($"JewYourItem: {_listeners.Count(l => l.IsRunning)}/{_listeners.Count} active");
-        
-        // Display rate limit status
-        if (_rateLimiter != null)
+        else
         {
-            _rateLimiter.LogCurrentState();
+            ImGui.Text("🔍 No active searches");
         }
         
         if (_recentItems.Count > 0)
         {
             ImGui.Separator();
+            ImGui.Text("📦 Recent Items:");
+            ImGui.Spacing();
+            
             foreach (var item in _recentItems)
             {
-                ImGui.Text($"{item.name} - {item.price} at ({item.x}, {item.y})");
+                ImGui.BulletText($"{item.name} - {item.price}");
+                ImGui.SameLine();
+                ImGui.TextDisabled($"({item.x}, {item.y})");
             }
-        }
-        else
-        {
-            ImGui.Text("No recent items");
         }
 
         ImGui.PopStyleColor(2);
+        ImGui.PopStyleVar(2);
         ImGui.End();
 
         if (Settings.ShowGui.Value)
@@ -1851,34 +2029,67 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     private void StopDisabledListeners()
     {
-        LogMessage("🔍 CHECKING: Stopping listeners for disabled groups/searches...");
+        var listenersToRemove = new List<SearchListener>();
+        
         foreach (var listener in _listeners.ToList())
         {
             // Check if the search itself is disabled OR its parent group is disabled
             bool searchStillActive = false;
+            bool foundMatchingConfig = false;
+            string disableReason = "";
+            
             foreach (var group in Settings.Groups)
             {
-                if (!group.Enable.Value) continue; // Group disabled - skip all its searches
-                
                 foreach (var search in group.Searches)
                 {
-                    if (search.Enable.Value && 
-                        search.League.Value == listener.Config.League.Value && 
+                    if (search.League.Value == listener.Config.League.Value && 
                         search.SearchId.Value == listener.Config.SearchId.Value)
                     {
-                        searchStillActive = true;
+                        foundMatchingConfig = true;
+                        
+                        // CRITICAL: Group disable overrides everything
+                        if (!group.Enable.Value)
+                        {
+                            disableReason = $"group '{group.Name.Value}' disabled";
+                            searchStillActive = false;
+                        }
+                        else if (!search.Enable.Value)
+                        {
+                            disableReason = "search disabled";
+                            searchStillActive = false;
+                        }
+                        else
+                        {
+                            searchStillActive = true;
+                        }
                         break;
                     }
                 }
-                if (searchStillActive) break;
+                if (foundMatchingConfig) break;
             }
             
-            if (!searchStillActive)
+            // If we didn't find the config at all, or it's disabled, stop the listener
+            if (!foundMatchingConfig || !searchStillActive)
             {
+                if (!foundMatchingConfig)
+                {
+                    disableReason = "config not found";
+                }
+                LogMessage($"🛑 DISABLING: {listener.Config.SearchId.Value} - {disableReason}");
                 listener.Stop();
-                _listeners.Remove(listener);
-                LogMessage($"🛑 DISABLED: Stopped listener for disabled search/group: {listener.Config.SearchId.Value}");
+                listenersToRemove.Add(listener);
             }
+        }
+        
+        // Remove stopped listeners
+        if (listenersToRemove.Count > 0)
+        {
+            LogMessage($"🛑 STOPPING: {listenersToRemove.Count} disabled listeners");
+            foreach (var listener in listenersToRemove)
+            {
+                _listeners.Remove(listener);
+            }
+            LogMessage($"✅ STOPPED: {listenersToRemove.Count} listeners removed, {_listeners.Count} remaining");
         }
     }
 
