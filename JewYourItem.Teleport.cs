@@ -392,7 +392,7 @@ public partial class JewYourItem
                 }
                 
                 // INSTANT MOUSE MOVEMENT: Move cursor during loading screen if coordinates have been learned
-                // This happens right after sending the teleport request, before the new hideout loads
+                // This only works when we have learned coordinates, otherwise we wait for the purchase window
                 if (Settings.MoveMouseToItem.Value && Settings.HasLearnedPurchaseWindow.Value && !GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
                 {
                     string tpType = _isManualTeleport ? "manual" : "auto";
@@ -405,6 +405,10 @@ public partial class JewYourItem
                 {
                     LogWarning($"⚠️ MERCHANT WINDOW OPEN: Skipping mouse movement to prevent buying wrong item during hideout TP");
                     LogDebug($"🛡️ SAFETY: Will move mouse only after merchant window closes and new hideout loads");
+                }
+                else if (Settings.MoveMouseToItem.Value && !Settings.HasLearnedPurchaseWindow.Value)
+                {
+                    LogDebug($"🎓 NO LEARNED COORDINATES: Will learn and move mouse when purchase window opens");
                 }
                 
                 lock (_recentItemsLock)

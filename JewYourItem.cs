@@ -482,8 +482,26 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             LogDebug("🚪 PURCHASE WINDOW CLOSED: Mouse movement will be allowed on next window open");
             _windowWasClosedSinceLastMovement = true;
             _allowMouseMovement = true;
+            
+            // If we have a teleported item and the window just closed, move mouse during loading
+            if (_teleportedItemLocation.HasValue && Settings.MoveMouseToItem.Value)
+            {
+                LogMessage($"🖱️ WINDOW CLOSED: Moving mouse to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y}) during loading");
+                if (Settings.HasLearnedPurchaseWindow.Value)
+                {
+                    LogInfo($"🎯 LOADING SCREEN MOUSE MOVE: Moving to item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                    MoveMouseToCalculatedPosition(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                }
+                else
+                {
+                    LogInfo($"🎯 LOADING SCREEN MOUSE MOVE: Using learned position for item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                    MoveMouseToLearnedPosition();
+                }
+                _teleportedItemLocation = null; // Clear immediately after use to prevent wrong item
+            }
         }
         
+        // Handle purchase window state changes and mouse movement
         if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible)
         {
             LogMessage($"🖱️ PURCHASE WINDOW OPENED: MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
@@ -492,58 +510,48 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             
             // CRITICAL: Move mouse to item after hideout TP when merchant window opens
             // This handles the case where hideout TP was sent but mouse movement was skipped due to open merchant window
-            if (Settings.MoveMouseToItem.Value && _teleportedItemLocation.HasValue && Settings.HasLearnedPurchaseWindow.Value)
+            if (Settings.MoveMouseToItem.Value && _teleportedItemLocation.HasValue)
             {
-                LogInfo($"🎯 HIDEOUT TP MOUSE MOVE: Merchant window opened after hideout TP, moving to item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
-                MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
-            }
-            
-            // Learn purchase window coordinates for future instant mouse movement
-            if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
-            {
-                LogMessage($"🎓 LEARNING TRIGGER: Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
-                LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
-            }
-            else if (Settings.HasLearnedPurchaseWindow.Value)
-            {
-                LogMessage($"🎓 ALREADY LEARNED: Using stored coordinates ({Settings.PurchaseWindowX.Value}, {Settings.PurchaseWindowY.Value})");
-            }
-            else if (!_teleportedItemLocation.HasValue)
-            {
-                LogDebug("🎓 LEARNING SKIPPED: No teleported item location available for learning");
-            }
-        }
-        if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
-        {
-            if (_allowMouseMovement && _windowWasClosedSinceLastMovement)
-            {
-                if (_teleportedItemLocation.HasValue)
+                LogInfo($"🎯 MOUSE MOVE TRIGGER: MoveMouseToItem={Settings.MoveMouseToItem.Value}, HasLearned={Settings.HasLearnedPurchaseWindow.Value}, Location=({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                if (Settings.HasLearnedPurchaseWindow.Value)
                 {
-                    LogMessage($"🖱️ SAFE MOUSE MOVE (Main): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                    LogInfo($"🎯 HIDEOUT TP MOUSE MOVE: Merchant window opened after hideout TP, moving to item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
                     MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
-                    _teleportedItemLocation = null; // Clear after use
-                    _allowMouseMovement = false; // Block further movement until window closes
-                    _windowWasClosedSinceLastMovement = false;
                 }
-                else 
+                else
                 {
-                    lock (_recentItemsLock)
-                    {
-                        if (_recentItems.Count > 0)
-                        {
-                            LogDebug("🖱️ SAFE FALLBACK MOVE (Main): Window was closed, using most recent item");
-                            var item = _recentItems.Peek();
-                            MoveMouseToItemLocation(item.X, item.Y);
-                            _allowMouseMovement = false; // Block further movement until window closes
-                        }
-                    }
-                    _windowWasClosedSinceLastMovement = false;
+                    LogInfo($"🎯 HIDEOUT TP MOUSE MOVE: Using learned position for item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                    MoveMouseToLearnedPosition();
                 }
+                _teleportedItemLocation = null; // Clear immediately after use to prevent wrong item
             }
             else
             {
-                LogDebug("🚫 MOUSE MOVE BLOCKED (Main): Purchase window opened but previous window was not closed (preventing accidental purchases)");
+                LogDebug($"🎯 MOUSE MOVE SKIPPED: MoveMouseToItem={Settings.MoveMouseToItem.Value}, HasLocation={_teleportedItemLocation.HasValue}");
             }
+        }
+        // Handle case where purchase window is already open when we have a teleported item
+        // We should wait for the user to close it and then move mouse during loading
+        else if (currentPurchaseWindowVisible && _teleportedItemLocation.HasValue && Settings.MoveMouseToItem.Value)
+        {
+            LogMessage($"🖱️ PURCHASE WINDOW ALREADY OPEN: Waiting for user to close window before moving mouse to item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+            LogDebug($"🛡️ SAFETY: Will move mouse only after window closes and new hideout loads");
+            // Note: Don't clear _teleportedItemLocation here - we need it for when the window closes
+        }
+        
+        // Learn purchase window coordinates for future instant mouse movement
+        if (currentPurchaseWindowVisible && !Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
+        {
+            LogMessage($"🎓 LEARNING TRIGGER: Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+            LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+        }
+        else if (currentPurchaseWindowVisible && Settings.HasLearnedPurchaseWindow.Value)
+        {
+            LogMessage($"🎓 ALREADY LEARNED: Using stored coordinates ({Settings.PurchaseWindowX.Value}, {Settings.PurchaseWindowY.Value})");
+        }
+        else if (currentPurchaseWindowVisible && !_teleportedItemLocation.HasValue)
+        {
+            LogDebug("🎓 LEARNING SKIPPED: No teleported item location available for learning");
         }
         _lastPurchaseWindowVisible = currentPurchaseWindowVisible;
 
