@@ -412,13 +412,17 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         }
         _lastHotkeyState = currentHotkeyState;
 
-        // Check Stop All hotkey
+        // Check Stop All hotkey - moved outside throttling for instant response
         bool currentStopAllState = Input.GetKeyState(Settings.StopAllHotkey.Value);
         if (currentStopAllState && !_lastStopAllState)
         {
             LogMessage($"🛑 STOP ALL HOTKEY PRESSED: {Settings.StopAllHotkey.Value} - force stopping all searches");
             ForceStopAll();
             LogMessage("🛑 ALL SEARCHES STOPPED: Stop All hotkey pressed");
+        }
+        else if (currentStopAllState && _lastStopAllState)
+        {
+            LogDebug($"🛑 STOP ALL HOTKEY HELD: {Settings.StopAllHotkey.Value} (already pressed)");
         }
         _lastStopAllState = currentStopAllState;
 

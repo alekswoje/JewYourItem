@@ -236,8 +236,7 @@ public partial class JewYourItem
 
         if (Settings.ShowGui.Value)
         {
-            // Show basic status
-            Graphics.DrawText($"JewYourItem: {_listeners.Count(l => l.IsRunning)} active", new Vector2(100, 100), Color.LightGreen);
+            // REMOVED: Green status text display
             
             // Show current teleporting item during loading screens
             if (_currentTeleportingItem != null)
