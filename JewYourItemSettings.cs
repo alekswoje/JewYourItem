@@ -33,9 +33,7 @@ public class JewYourItemSettings : ISettings
     [Menu("Show GUI", "Display the graphical user interface")]
     [IgnoreMenu]
     public ToggleNode ShowGui { get; set; } = new ToggleNode(true);
-    [Menu("Teleport Cooldown (s)", "Cooldown period between teleports (1-30s)")]
-    [IgnoreMenu]
-    public RangeNode<int> TpCooldown { get; set; } = new RangeNode<int>(10, 1, 30);
+    // TP Cooldown removed - now uses dynamic locking based on TP state
     [Menu("Move Mouse to Item", "Move mouse cursor to highlighted items")]
     [IgnoreMenu]
     public ToggleNode MoveMouseToItem { get; set; } = new ToggleNode(true);
@@ -43,6 +41,11 @@ public class JewYourItemSettings : ISettings
     [IgnoreMenu]
     public ToggleNode AutoBuy { get; set; } = new ToggleNode(false);
     public Vector2 WindowPosition { get; set; } = new Vector2(10, 800);
+    
+    // Purchase window coordinates for instant mouse movement
+    public RangeNode<int> PurchaseWindowX { get; set; } = new RangeNode<int>(0, 0, 3840);
+    public RangeNode<int> PurchaseWindowY { get; set; } = new RangeNode<int>(0, 0, 2160);
+    public ToggleNode HasLearnedPurchaseWindow { get; set; } = new ToggleNode(false);
     public List<SearchGroup> Groups { get; set; } = new List<SearchGroup>();
     [JsonIgnore]
     public GroupsRenderer GroupsConfig { get; set; }

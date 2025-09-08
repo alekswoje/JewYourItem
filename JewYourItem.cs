@@ -511,6 +511,17 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     [DllImport("user32.dll")]
     static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
+    [DllImport("user32.dll")]
+    static extern int GetSystemMetrics(int nIndex);
+
+    // Mouse event constants
+    private const uint MOUSEEVENTF_MOVE = 0x0001;
+    private const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
+    
+    // System metrics constants
+    private const int SM_CXSCREEN = 0;
+    private const int SM_CYSCREEN = 1;
+
     // Mouse event flags
     private const uint MOUSEEVENTF_LEFTDOWN = 0x02;
     private const uint MOUSEEVENTF_LEFTUP = 0x04;
@@ -549,6 +560,10 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private bool _areaChangeCooldownLogged = false;
     private (int x, int y)? _teleportedItemLocation = null;
     private bool _isManualTeleport = false;
+    
+    // Dynamic TP cooldown state
+    private bool _tpLocked = false;
+    private DateTime _tpLockedTime = DateTime.MinValue;
 
     public override bool Initialise()
     {
@@ -618,7 +633,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         LogMessage($"Sound enabled: {Settings.PlaySound.Value}");
         LogMessage($"Auto TP enabled: {Settings.AutoTp.Value}");
         LogMessage($"GUI enabled: {Settings.ShowGui.Value}");
-        LogMessage($"TP Cooldown set to: {Settings.TpCooldown.Value} seconds");
+        LogMessage("TP Cooldown: Using dynamic locking (locked until window loads or 10s timeout)");
         LogMessage($"Move Mouse to Item enabled: {Settings.MoveMouseToItem.Value}");
 
         return true;
@@ -1066,7 +1081,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                             }
                                             if (_parent.Settings.AutoTp.Value && _parent.GameController.Area.CurrentArea.IsHideout)
                                             {
-                                                if ((DateTime.Now - _parent._lastTpTime).TotalSeconds >= _parent.Settings.TpCooldown.Value)
+                                                if (!_parent._tpLocked)
                                                 {
                                                     _parent.TravelToHideout();
                                                     _parent._recentItems.Clear();
@@ -1075,7 +1090,8 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                                                 }
                                                 else
                                                 {
-                                                    logMessage($"Auto TP skipped: Cooldown of {_parent.Settings.TpCooldown.Value} seconds not met.");
+                                                    double remainingTime = 10 - (DateTime.Now - _parent._tpLockedTime).TotalSeconds;
+                                                    logMessage($"Auto TP skipped: TP locked, waiting for window or timeout ({remainingTime:F1}s remaining)");
                                                 }
                                             }
                                             // REMOVED: Mouse movement should only happen after manual teleports, not when auto TP is blocked by cooldown
@@ -1294,11 +1310,23 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             return;
         }
 
-        if ((DateTime.Now - _lastTpTime).TotalSeconds < Settings.TpCooldown.Value)
+        // Check dynamic TP lock state
+        if (_tpLocked)
         {
-            LogMessage($"Teleport skipped: Cooldown of {Settings.TpCooldown.Value} seconds not met.");
-            _isManualTeleport = false; // Reset flag on early return
-            return;
+            // Check for timeout (10 seconds)
+            if ((DateTime.Now - _tpLockedTime).TotalSeconds >= 10)
+            {
+                LogMessage("🔓 TP UNLOCKED: 10-second timeout reached, unlocking TP");
+                _tpLocked = false;
+                _tpLockedTime = DateTime.MinValue;
+            }
+            else
+            {
+                double remainingTime = 10 - (DateTime.Now - _tpLockedTime).TotalSeconds;
+                LogMessage($"🔒 TP LOCKED: Waiting for purchase window or timeout ({remainingTime:F1}s remaining)");
+                _isManualTeleport = false; // Reset flag on early return
+                return;
+            }
         }
 
         LogMessage("=== TRAVEL TO HIDEOUT HOTKEY PRESSED ===");
@@ -1358,6 +1386,11 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             LogMessage("Sending teleport request...");
             var response = _httpClient.SendAsync(request).Result;
             LogMessage($"Response status: {response.StatusCode}");
+            
+            // Lock TP immediately after successful request send (before checking response)
+            _tpLocked = true;
+            _tpLockedTime = DateTime.Now;
+            LogMessage("🔒 TP LOCKED: Request sent successfully, locked until window loads or timeout");
             
             // Handle rate limiting
             if (_rateLimiter != null)
@@ -1422,13 +1455,19 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     LogMessage($"📍 STORED TELEPORT LOCATION: Auto teleport to item at ({x}, {y}) for mouse movement");
                 }
                 
-                // Move mouse immediately if purchase window is already open
-                if (Settings.MoveMouseToItem.Value && GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
+                // INSTANT MOUSE MOVEMENT: Move mouse immediately using learned coordinates (don't wait for window)
+                if (Settings.MoveMouseToItem.Value && Settings.HasLearnedPurchaseWindow.Value)
+                {
+                    string tpType = _isManualTeleport ? "manual" : "auto";
+                    LogMessage($"⚡ INSTANT MOUSE MOVE: {tpType} teleport succeeded, moving immediately to learned coordinates ({Settings.PurchaseWindowX.Value}, {Settings.PurchaseWindowY.Value})");
+                    MoveMouseToLearnedPosition();
+                }
+                // Fallback: Move mouse if purchase window is already open (first time learning)
+                else if (Settings.MoveMouseToItem.Value && GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
                 {
                     string tpType = _isManualTeleport ? "manually" : "auto";
-                    LogMessage($"🖱️ IMMEDIATE MOUSE MOVE: Purchase window already open, moving to {tpType} teleported item");
+                    LogMessage($"🖱️ FALLBACK MOUSE MOVE: Purchase window already open, moving to {tpType} teleported item for learning");
                     MoveMouseToItemLocation(x, y);
-                    _teleportedItemLocation = null; // Clear after use
                 }
                 
                 _recentItems.Clear();
@@ -1440,6 +1479,15 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         {
             LogError($"Teleport request failed: {ex.Message}");
             LogError($"Exception details: {ex}");
+            
+            // Unlock TP if request failed due to exception
+            if (_tpLocked)
+            {
+                LogMessage("🔓 TP UNLOCKED: Request failed with exception, unlocking TP");
+                _tpLocked = false;
+                _tpLockedTime = DateTime.MinValue;
+            }
+            
             _isManualTeleport = false; // Reset flag on exception
         }
     }
@@ -1569,6 +1617,83 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         LogMessage("📦 Cleared recent items due to area change (preserved teleported location for mouse movement)");
     }
 
+    private void LearnPurchaseWindowCoordinates(int stashX, int stashY)
+    {
+        try
+        {
+            var purchaseWindow = GameController.IngameState.IngameUi.PurchaseWindowHideout;
+            if (!purchaseWindow.IsVisible) return;
+
+            var stashPanel = purchaseWindow.TabContainer.StashInventoryPanel;
+            if (stashPanel == null) return;
+
+            var rect = stashPanel.GetClientRectCache;
+            if (rect.Width <= 0 || rect.Height <= 0) return;
+
+            // Calculate screen coordinates for the stash position
+            float cellWidth = rect.Width / 12f;
+            float cellHeight = rect.Height / 12f;
+            int screenX = (int)(rect.Left + (stashX * cellWidth) + (cellWidth / 2));
+            int screenY = (int)(rect.Top + (stashY * cellHeight) + (cellHeight / 2));
+
+            // Store the learned coordinates
+            Settings.PurchaseWindowX.Value = screenX;
+            Settings.PurchaseWindowY.Value = screenY;
+            Settings.HasLearnedPurchaseWindow.Value = true;
+
+            LogMessage($"🎓 LEARNED PURCHASE WINDOW: Stash({stashX},{stashY}) -> Screen({screenX},{screenY}) - Stored for instant movement");
+        }
+        catch (Exception ex)
+        {
+            LogError($"Failed to learn purchase window coordinates: {ex.Message}");
+        }
+    }
+
+    private void MoveMouseToLearnedPosition()
+    {
+        try
+        {
+            // CRITICAL: Respect plugin enable state
+            if (!Settings.Enable.Value) return;
+
+            int x = Settings.PurchaseWindowX.Value;
+            int y = Settings.PurchaseWindowY.Value;
+
+            // Move mouse to learned coordinates instantly
+            mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 
+                       (uint)((x * 65535) / GetSystemMetrics(SM_CXSCREEN)), 
+                       (uint)((y * 65535) / GetSystemMetrics(SM_CYSCREEN)), 0, 0);
+
+            LogMessage($"⚡ MOVED MOUSE TO LEARNED POSITION: Screen({x},{y})");
+
+            // Auto Buy: Wait for purchase window to actually load, then click
+            if (Settings.AutoBuy.Value)
+            {
+                LogMessage("🛒 AUTO BUY: Scheduling click after window loads...");
+                Task.Run(async () =>
+                {
+                    // Wait up to 3 seconds for purchase window to be visible
+                    for (int i = 0; i < 30; i++) // 30 * 100ms = 3 seconds
+                    {
+                        if (GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible)
+                        {
+                            await Task.Delay(100); // Small delay to ensure window is fully loaded
+                            await PerformCtrlLeftClickAsync();
+                            LogMessage("🛒 AUTO BUY: Executed click after window loaded");
+                            return;
+                        }
+                        await Task.Delay(100);
+                    }
+                    LogMessage("⚠️ AUTO BUY: Timeout waiting for purchase window to load");
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"Failed to move mouse to learned position: {ex.Message}");
+        }
+    }
+
     public async Task PlaySoundWithNAudio(string soundPath, Action<string> logMessage, Action<string> logError)
     {
         try
@@ -1668,6 +1793,14 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 if (purchaseWindowVisible && !_lastPurchaseWindowVisible)
                 {
                     LogMessage($"🖱️ PURCHASE WINDOW OPENED (Throttled): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}");
+                    
+                    // Unlock TP when purchase window opens
+                    if (_tpLocked)
+                    {
+                        LogMessage("🔓 TP UNLOCKED (Throttled): Purchase window opened successfully");
+                        _tpLocked = false;
+                        _tpLockedTime = DateTime.MinValue;
+                    }
                 }
                 if (purchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
                 {
@@ -1715,6 +1848,14 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible)
                 {
                     LogMessage($"🖱️ PURCHASE WINDOW OPENED (Area): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}");
+                    
+                    // Unlock TP when purchase window opens
+                    if (_tpLocked)
+                    {
+                        LogMessage("🔓 TP UNLOCKED (Area): Purchase window opened successfully");
+                        _tpLocked = false;
+                        _tpLockedTime = DateTime.MinValue;
+                    }
                 }
                 if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
                 {
@@ -1768,11 +1909,25 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         }
         _lastHotkeyState = currentHotkeyState;
 
-        // Check if purchase window just became visible and move mouse to teleported item
+        // Check if purchase window just became visible and learn coordinates + move mouse to teleported item
         bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
         if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible)
         {
             LogMessage($"🖱️ PURCHASE WINDOW OPENED: MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}");
+            
+            // Unlock TP when purchase window opens
+            if (_tpLocked)
+            {
+                LogMessage("🔓 TP UNLOCKED: Purchase window opened successfully");
+                _tpLocked = false;
+                _tpLockedTime = DateTime.MinValue;
+            }
+            
+            // Learn purchase window coordinates for future instant mouse movement
+            if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
+            {
+                LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+            }
         }
         if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
         {
@@ -2018,10 +2173,10 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.1f, 0.1f, 0.1f, 0.8f));
         ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.9f, 0.9f, 0.9f, 1.0f));
 
-        if (Settings.AutoTp.Value && (DateTime.Now - _lastTpTime).TotalSeconds < Settings.TpCooldown.Value)
+        if (Settings.AutoTp.Value && _tpLocked)
         {
-            float remainingCooldown = Settings.TpCooldown.Value - (float)(DateTime.Now - _lastTpTime).TotalSeconds;
-            ImGui.Text($"TP Cooldown: {remainingCooldown:F1}s");
+            float remainingTime = 10 - (float)(DateTime.Now - _tpLockedTime).TotalSeconds;
+            ImGui.Text($"TP Locked: {remainingTime:F1}s");
         }
 
         // Use child windows and proper spacing for better auto-sizing
@@ -2265,19 +2420,7 @@ public class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             _settingsUpdated = false;
         }
 
-        var tpCooldown = Settings.TpCooldown.Value;
-        ImGui.Text("TP Cooldown (seconds):");
-        ImGui.SameLine();
-        if (ImGui.InputInt("##TpCooldown", ref tpCooldown, 1, 10) && !_settingsUpdated)
-        {
-            Settings.TpCooldown.Value = Math.Clamp(tpCooldown, 1, 30);
-            _settingsUpdated = true;
-            LogMessage($"TP Cooldown updated to: {Settings.TpCooldown.Value} seconds");
-        }
-        if (!ImGui.IsItemActive())
-        {
-            _settingsUpdated = false;
-        }
+        ImGui.Text("TP Cooldown: Dynamic (locked until window loads or 10s timeout)");
 
         var moveMouseToItem = Settings.MoveMouseToItem.Value;
         ImGui.Checkbox("Move Mouse to Item on Load", ref moveMouseToItem);
