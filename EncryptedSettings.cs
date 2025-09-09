@@ -8,9 +8,6 @@ namespace JewYourItem.Utility
 {
     public class EncryptedSettings
     {
-        private static readonly byte[] Key = Encoding.UTF8.GetBytes("JewYourItem_SecretKey_2024!"); // In production, use a more secure key derivation
-        private static readonly byte[] IV = Encoding.UTF8.GetBytes("JewYourItem_IV_2024!"); // In production, generate random IV per encryption
-        
         public static string EncryptString(string plainText)
         {
             if (string.IsNullOrEmpty(plainText))
@@ -18,23 +15,9 @@ namespace JewYourItem.Utility
 
             try
             {
-                using (var aes = Aes.Create())
-                {
-                    aes.Key = Key;
-                    aes.IV = IV;
-                    aes.Mode = CipherMode.CBC;
-                    aes.Padding = PaddingMode.PKCS7;
-
-                    using (var encryptor = aes.CreateEncryptor())
-                    using (var msEncrypt = new MemoryStream())
-                    using (var csEncrypt = new CryptoStream(msEncrypt, encryptor, CryptoStreamMode.Write))
-                    using (var swEncrypt = new StreamWriter(csEncrypt))
-                    {
-                        swEncrypt.Write(plainText);
-                        swEncrypt.Close();
-                        return Convert.ToBase64String(msEncrypt.ToArray());
-                    }
-                }
+                byte[] data = Encoding.UTF8.GetBytes(plainText);
+                byte[] encrypted = ProtectedData.Protect(data, null, DataProtectionScope.CurrentUser);
+                return Convert.ToBase64String(encrypted);
             }
             catch (Exception)
             {
@@ -49,23 +32,9 @@ namespace JewYourItem.Utility
 
             try
             {
-                byte[] cipherBytes = Convert.FromBase64String(cipherText);
-                
-                using (var aes = Aes.Create())
-                {
-                    aes.Key = Key;
-                    aes.IV = IV;
-                    aes.Mode = CipherMode.CBC;
-                    aes.Padding = PaddingMode.PKCS7;
-
-                    using (var decryptor = aes.CreateDecryptor())
-                    using (var msDecrypt = new MemoryStream(cipherBytes))
-                    using (var csDecrypt = new CryptoStream(msDecrypt, decryptor, CryptoStreamMode.Read))
-                    using (var srDecrypt = new StreamReader(csDecrypt))
-                    {
-                        return srDecrypt.ReadToEnd();
-                    }
-                }
+                byte[] encrypted = Convert.FromBase64String(cipherText);
+                byte[] decrypted = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser);
+                return Encoding.UTF8.GetString(decrypted);
             }
             catch (Exception)
             {
