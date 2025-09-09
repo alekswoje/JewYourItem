@@ -117,16 +117,12 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         _rateLimiter = new ConservativeRateLimiter(LogMessage, LogError);
         
         // Use secure session ID storage with fallback to regular session ID
-        LogMessage("🔍 DEBUG: Checking secure session ID storage...");
         _sessionIdBuffer = Settings.SecureSessionId ?? "";
-        LogMessage($"🔍 DEBUG: Secure session ID length: {_sessionIdBuffer?.Length ?? 0}");
         
         // Fallback to regular session ID if secure storage is empty
         if (string.IsNullOrEmpty(_sessionIdBuffer))
         {
-            LogMessage("🔍 DEBUG: Secure storage empty, checking regular session ID...");
             _sessionIdBuffer = Settings.SessionId.Value ?? "";
-            LogMessage($"🔍 DEBUG: Regular session ID length: {_sessionIdBuffer?.Length ?? 0}");
             
             if (!string.IsNullOrEmpty(_sessionIdBuffer))
             {
@@ -136,10 +132,6 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 LogMessage("✅ Session ID migrated to secure storage");
             }
         }
-        else
-        {
-            LogMessage("✅ Using secure session ID storage");
-        }
         
         if (string.IsNullOrEmpty(_sessionIdBuffer))
         {
@@ -148,8 +140,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         }
         else
         {
-            LogMessage($"✅ Session ID loaded successfully (length: {_sessionIdBuffer.Length})");
-            LogMessage($"🔍 DEBUG: Session ID starts with: {_sessionIdBuffer.Substring(0, Math.Min(8, _sessionIdBuffer.Length))}...");
+            LogMessage("✅ Session ID loaded successfully");
             
             // Validate session ID format (should be 32 characters, alphanumeric)
             if (_sessionIdBuffer.Length != 32)
@@ -301,8 +292,6 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     {
         try
         {
-            LogMessage("🔍 TESTING: Validating session ID with Path of Exile API...");
-            
             using (var request = new HttpRequestMessage(HttpMethod.Get, "https://www.pathofexile.com/api/profile"))
             {
                 request.Headers.Add("Cookie", $"POESESSID={sessionId}");
@@ -312,23 +301,22 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 {
                     if (response.IsSuccessStatusCode)
                     {
-                        LogMessage("✅ SESSION ID VALID: Successfully authenticated with Path of Exile API");
+                        LogMessage("✅ Session ID validated successfully");
                     }
                     else if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                     {
-                        LogMessage("❌ SESSION ID INVALID: 401 Unauthorized - Session ID is expired or invalid");
-                        LogMessage("💡 SOLUTION: Get a fresh POESESSID from pathofexile.com cookies");
+                        LogMessage("❌ Session ID invalid - please get a fresh POESESSID from pathofexile.com cookies");
                     }
                     else
                     {
-                        LogMessage($"⚠️ SESSION ID TEST: Unexpected response {response.StatusCode} - Session ID may be invalid");
+                        LogMessage($"⚠️ Session ID test failed with status {response.StatusCode}");
                     }
                 }
             }
         }
         catch (Exception ex)
         {
-            LogMessage($"⚠️ SESSION ID TEST FAILED: {ex.Message}");
+            LogMessage($"⚠️ Session ID validation failed: {ex.Message}");
         }
     }
 

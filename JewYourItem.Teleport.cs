@@ -620,7 +620,7 @@ public partial class JewYourItem
                 {
                     outputDevice.Init(audioFile);
                     outputDevice.Play();
-a                }
+                }
             });
         }
         catch (Exception ex)

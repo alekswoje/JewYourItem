@@ -62,10 +62,6 @@ public partial class JewYourItem
 
             lock (_connectionLock)
             {
-                // DEBUG: Log session ID details
-                logMessage($"🔍 DEBUG: SearchListener received session ID length: {sessionId?.Length ?? 0}");
-                logMessage($"🔍 DEBUG: League: '{Config.League.Value}', SearchId: '{Config.SearchId.Value}'");
-                
                 // STRICT CONNECTION SAFETY CHECKS
                 if (string.IsNullOrEmpty(Config.League.Value) || string.IsNullOrEmpty(Config.SearchId.Value) || string.IsNullOrEmpty(sessionId))
                 {
@@ -147,8 +143,6 @@ public partial class JewYourItem
 
                 WebSocket = new ClientWebSocket();
                 var cookie = $"POESESSID={sessionId}";
-                logMessage($"🔍 DEBUG: Setting WebSocket cookie: POESESSID={sessionId?.Substring(0, Math.Min(8, sessionId?.Length ?? 0))}...");
-                logMessage($"🔍 DEBUG: Full cookie string: {cookie}");
                 WebSocket.Options.SetRequestHeader("Cookie", cookie);
                 WebSocket.Options.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
                 WebSocket.Options.SetRequestHeader("Origin", "https://www.pathofexile.com");
@@ -178,7 +172,6 @@ public partial class JewYourItem
                 string url = $"wss://www.pathofexile.com/api/trade2/live/poe2/{Uri.EscapeDataString(Config.League.Value)}/{Config.SearchId.Value}";
 
                 _logMessage($"🔌 CONNECTING: {Config.SearchId.Value} to {url}");
-                logMessage($"🔍 DEBUG: WebSocket headers set - attempting connection...");
                 await WebSocket.ConnectAsync(new Uri(url), Cts.Token);
 
                 // Only increment global counter AFTER successful connection
@@ -209,8 +202,6 @@ public partial class JewYourItem
                 }
 
                 _logError($"❌ CONNECTION FAILED: Search {Config.SearchId.Value}: {ex.Message} - Retry in {_currentRetryDelay}ms");
-                _logError($"🔍 DEBUG: Exception type: {ex.GetType().Name}");
-                _logError($"🔍 DEBUG: Exception details: {ex}");
                 LastErrorTime = DateTime.Now;
 
                 // Clean up WebSocket on failure
@@ -397,7 +388,6 @@ public partial class JewYourItem
                             using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
                             {
                                 var cookie = $"POESESSID={sessionId}";
-                                logMessage($"🔍 DEBUG: Setting HTTP cookie: POESESSID={sessionId?.Substring(0, Math.Min(8, sessionId?.Length ?? 0))}...");
                                 request.Headers.Add("Cookie", cookie);
                                 request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
                                 request.Headers.Add("Accept", "*/*");
