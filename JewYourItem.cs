@@ -29,25 +29,6 @@ namespace JewYourItem;
 
 public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 {
-    // Debug-aware logging methods
-    private void LogDebug(string message)
-    {
-        if (Settings.DebugMode.Value)
-        {
-            LogMessage($"[DEBUG] {message}");
-        }
-    }
-    
-    private void LogInfo(string message)
-    {
-        LogMessage($"[INFO] {message}");
-    }
-    
-    private void LogWarning(string message)
-    {
-        LogMessage($"[WARN] {message}");
-    }
-    
     // Windows API declarations for mouse clicks
     [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
     public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, UIntPtr dwExtraInfo);
@@ -71,7 +52,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     // Mouse event constants
     private const uint MOUSEEVENTF_MOVE = 0x0001;
     private const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
-    
+
     // System metrics constants
     private const int SM_CXSCREEN = 0;
     private const int SM_CYSCREEN = 1;
@@ -91,26 +72,21 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private string _sessionIdBuffer = "";
     private List<string> _recentResponses = new List<string>();
     private const int MaxResponses = 5;
-    private static readonly HttpClient _httpClient = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli })
-    {
-        Timeout = TimeSpan.FromSeconds(30) // 30 second timeout to prevent infinite hangs
-    };
+    private static readonly HttpClient _httpClient = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli });
     private Queue<RecentItem> _recentItems = new Queue<RecentItem>();
-    private readonly object _recentItemsLock = new object(); // Thread safety for _recentItems queue
     private bool _playSound = true;
     private bool _lastHotkeyState = false;
-    private bool _lastStopAllState = false;
     private DateTime _lastTpTime = DateTime.MinValue;
     private bool _settingsUpdated = false;
     private SearchListener _activeListener;
     private Dictionary<JewYourItemInstanceSettings, DateTime> _lastRestartTimes = new Dictionary<JewYourItemInstanceSettings, DateTime>();
-    private const int RestartCooldownSeconds = 300; // Increased to 5 minutes for safety
+    private const int RestartCooldownSeconds = 80; // Increased to 5 minutes for safety
     private bool _lastEnableState = true;
     private string _lastActiveConfigsHash = "";
     private ConservativeRateLimiter _rateLimiter;
     private bool _lastPurchaseWindowVisible = false;
     private static int _globalConnectionAttempts = 0;
-    public static DateTime _pluginStartTime = DateTime.Now;
+    private static DateTime _pluginStartTime = DateTime.Now;
     private static DateTime _lastGlobalReset = DateTime.Now;
     private static bool _emergencyShutdown = false;
     private static readonly Random _random = new Random();
@@ -118,17 +94,23 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private DateTime _lastAreaChangeTime = DateTime.MinValue;
     private DateTime _lastSettingsChangeTime = DateTime.MinValue;
     private bool _areaChangeCooldownLogged = false;
-    private DateTime _lastTeleportTime = DateTime.MinValue;
     private (int x, int y)? _teleportedItemLocation = null;
     private bool _isManualTeleport = false;
     private RecentItem _currentTeleportingItem = null;
-    
-    // Note: Removed TP lock system - now using loading screen check instead
-    
+    private readonly object _recentItemsLock = new object();
+
+    // Dynamic TP cooldown state
+    private bool _tpLocked = false;
+    private DateTime _tpLockedTime = DateTime.MinValue;
+
     // Purchase window state tracking to prevent accidental purchases
     private bool _allowMouseMovement = true;
     private bool _windowWasClosedSinceLastMovement = true;
-    private bool _mouseMovementLogged = false;
+
+    // Connection queue system
+    private readonly Queue<JewYourItemInstanceSettings> _connectionQueue = new Queue<JewYourItemInstanceSettings>();
+    private DateTime _lastConnectionTime = DateTime.MinValue;
+    private const int ConnectionDelayMs = 1500; // 1.5 seconds between connections
 
     public override bool Initialise()
     {
@@ -136,70 +118,70 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         _sessionIdBuffer = Settings.SessionId.Value ?? "";
         if (string.IsNullOrEmpty(_sessionIdBuffer))
         {
-            LogWarning("Warning: Session ID is empty. Please set it in the settings.");
+            LogMessage("Warning: Session ID is empty. Please set it in the settings.");
         }
-        
-        LogDebug("                                                                                                    ");
-        LogDebug("::::::::::::::::::::::::::::::::::::::::::::::::::-*@@@@@@%+:::::*=::=-:::::::::::::::::::::::::: ");
-        LogDebug("::::::::::::::::::::::::::::::::::::::::::::::=@@@+*@@#=@*+*@#@@@%@+=@+%+::::::::::::::::::::::::: ");
-        LogDebug(":::::::::::::::::::::::::::::::::::::::::::+@@@=+::*@@@#*+**%+@%@@*@%@@@#:=+:::::::::::::::::::::: ");
-        LogDebug(":::::::::::::::::::::::::::::::::::::::::#@%-::-*@@*:::::::::::=#*@#%@@@*@@+:::::::::::::::::::::: ");
-        LogDebug("::::::::::::::::::::::::::::::::::::::-@@%:@:*@*:::::::::::::::::::::-@@+@#@::::::::::::::::::::: ");
-        LogDebug(":::::::::::::::::::::::::::::::::::::+@+@@=@%:::::::::::::::::::::::::::==::@*::::::::::::::::::: ");
-        LogDebug("::::::::::::::::::::::::::::::::::::=@*@-@*@:::::::::::::::::::::::::::::::::=@-::::::::::::::::: ");
-        LogDebug(":::::::::::::::::::::::::::::::::::=@-@@@%#@*::::::::::::::::::::::::::::::::::@::::::::::::::::: ");
-        LogDebug(":::::::::::::::::::::::::::::::::::%@=@@@#%@#+%+-%@::::::::::::::::::::::::::::+@:::::::::::::::: ");
-        LogDebug(":::::::::::::::::::::::::::::::::::@+%=@%#@*@@@#@@-:::::::::::::::::::::::::::::+*::::::::::::::: ");
-        LogDebug(":::::::::::::::::::::::::::::::::-@@@@@@@+@@%@*+=-=@*:::::::::::::::::::::::::::*%:::::::::::::: ");
-        LogDebug("::::::::::::::::::::::::::::::=@%-@@@%@@*@@@=@@@@@@*::::*@%:#@--+::::+@@@@@#::::::+#::::::::::::: ");
-        LogDebug(":::::::::::::::::::::::::::::*#*@+@%+@#@@#@%@@*%-=-::::%@#:*=@+*%@%=-::*@@@%-+@@:::@-:::::::::::: ");
-        LogDebug(":::::::::::::::::::::-*%@@@#-#%=@@@@*@@@@@@@@%#@@*@+::::-##@@@*@@@@@@@-:=:::+-:::::**-=:::::::::: ");
-        LogDebug("::::::::::::::::::*%*-:=:::::=%@@#@@*@@%@@##@#@@*=::::::@@@:::::::-+%@@@%*#@#*@#@@@+%@+:::::::::: ");
-        LogDebug("::::::::::::::::%*-:::::=%+::+@%@@@@@#+@@@@%%+*#::::-:::@:=:::@@@@@@@#:=@@@-+@@*%@@*:@::::::::::: ");
-        LogDebug(":::::::::::::::@::::::::::+*:::::@@-:---:=@@@@%-::==::#@%*-=*@@-=@++:@*:::+::-@@=-:%@%::::::::::: ");
-        LogDebug(":::::::::::::-@:::%-:::::::@-::::@--@=-+@@-:@@@-::::::***@@@@-#@@@@@@@@::@+::::@@@@-*+::::::::::: ");
-        LogDebug(":::::::::::::%:::=@:::::::::%:::=@:-@=:*@:%+@@::-:-+:::::::::-::-++@+=::::::::::::-@#:::::::::::: ");
-        LogDebug("::::::::::::@-:::@::::::::::@+::-@:-@*:@@:-=@@=:+++-::::::::::::::::::::::::::::::::*#::::::::::: ");
-        LogDebug(":::::::::::@::::=+::::::::::-@::+@=:%*:@@:-@@#=:=*=::::::::::::::::::::::::::::::::::-@:::::::::: ");
-        LogDebug("::::::::::@-::::@:::::::::::::@::@%*:::-:::@@@*=@==-::-:::::::::::::::::::::::::::::::=@::::::::: ");
-        LogDebug(":::::::::=@*:::-@:::::::::::::=@:@-+@:@@::-@@@%@@-@@%:@%*@@=:=+:::::::@@%-:-%%:::::::::##:::::::: ");
-        LogDebug(":::::::::*+%:::-@::::::::::::::#=@=:@+::::=@%+*@@=*@@%@:-:::-@*@==:+@@=::::::-@-:--:::::%:::::::: ");
-        LogDebug("::::::::=#:-#-*=@::::::::::::::-*%@:+%:::@@@#@#@@%@@*@@-#@+@=::-#@%+:%:=#*-::::=-=-:::::%:::::::: ");
-        LogDebug(":::::::-@:::::*-@:::::::::::::::@+@::#@@@@@@@@@@@@#%@#%%=%#*@%@%##@@*#%-@@@@@+::::::::::%:::::::: ");
-        LogDebug(":::::::+*:::::=+@=::::::::::::::*%@::-%=@@+@@@@%@@+*@@@@@@@@@@@%@@@#@+#@+@@#--%#:::::-::#+::::::: ");
-        LogDebug("::::::::%-:::::-+@%:::::::::::::::@@:::+@@#@@@%@@@*%*@@@@@*+@@@@@@@@@%@@@@@:@@@*#%@@=::::=%::::::: ");
-        LogDebug("::::::::*-:::::-++#:::::::::::::::*=::::%*@*@+@@*@=#@@@@@%=@@+-::::--:::::=::-@@@-::@@+::#=::::::: ");
-        LogDebug("::::::::##::::::#-#:::::::::::::::-%::::@-==@@@@@@@@%@@@=@=:@%:#@@@-::::::-::+@@=#=::::--::::::::: ");
-        LogDebug("::::::::#:::::::@:%::::::::::::::::@-::-:@*@*@#@@*+@=#@@@%:=:@@@-:#++@@@@@%#@*@=:::::::::::::::::: ");
-        LogDebug("::::::::@@::::::#-@::::::::::::::::*#::::=@#@@@@@%@%@@@@@*:*#:=@@#+@@#::=@#*@-:::::::::::::::::::: ");
-        LogDebug("::::::::-*:#=::::*#@:::::::::::::::::%-::@@-@@@@*@*@+@#@*@@-*#::=@@@#@%@@@*@=::::::::::::::::::::: ");
-        LogDebug("::::::::@-:::::::=#%=::::::::::::::::-@::@@@@*%@@-@@@@@@@@*@@+%@+:::::+@@@#:#@@:::::::::::::::::::: ");
-        LogDebug("::::::::-@-::::::::@=#:::::::::::::::::-@=*:=@#+##@@=@@@@@@@@@@@%@@*:::::::-#@#@@-:::::::::::::::::: ");
-        LogDebug("::::::::@%:::::::::#-%::::::::::::::::::=@:%-@@%#@#@@@@@+#@@=@@@@@@@@@@@@@@*@@@@++%#*%:::::::::::::: ");
-        LogDebug("::::::::%+%+::::::::=+#:::::::::::::::::::=%-*=%%%*#=@@=@#@@*@@@#@@@@@@@*@*@@@@@@#:=--@:::::::::::::: ");
-        LogDebug("::::::::@::+:::::::::@==:::::::::::::::::::*-*+*%@@@@#@@@@@%@@@%@@@@#@#%@@@@@+::::::+#::::::::::::::: ");
-        LogDebug("::::::=+:::::::::::::+*#::::::::::::::::::::#+@:*@+@@**@@@@@@@@@@@%@@@@@@%@@:::::*@==+%+*+-:::::::::: ");
-        LogDebug("::::::+=:::::::::::::%@-::::::::::::::::::::#*+:-@@*-@@=#@+@@@@@@#@@@%*@@@:::::-@+:::@:::=+::::::::: ");
-        LogDebug("::::::*-:::::::::::::+*-:::::::::::::::::::::@%::-#:@@@+@@@@#@@%@@+@=@@@-::::::-:@%-%=::-@@#:::::::: ");
-        LogDebug("::::::+-::::::::::::::@+=:::::::::::::::::::::*+*%=%:=@+@@@@+=@@@@@@@@%-=::::::::@@+::+=:::#@::::::: ");
-        LogDebug("::::::=+::::::::::::::+##+:::::::::::::::::::::%+*:=*@@:*@#@*@@@@#@@%:+::::::::::::::-+:::#@%::::::: ");
-        LogDebug("::::::::::::::::::::::#--::::::::::::::::::-@@%%#::#@%:=#@@@*:::::=%-::::::::::::*%-::+*#-::#:::::: ");
-        LogDebug("::::::::::::::::::::::@:::::::::::::::::=@%-::+@#*==-::::::::::::::@::::::%@=-=#@@@:::::::+*:::::: ");
-        LogDebug(":::::::::::::::::::::::%::::::::::::::::@=:::-*:::::::::::::::::::*=@:::::::::::::-::+@+-*%::::::: ");
-        LogDebug("::::::::::::::::::::::+#::::::::::::::::::::@-:::::::::::::::::::-**=:::+@@*@#%@*=@*@#@-#:::::::: ");
-        LogDebug(":::::::::::::::::::::::+*::::::::::::::::::*@:::::::::::::::::::::*+=::-@+-@:%+*-=*#=:-@-:::::::: ");
-        LogDebug("::::::::::::::::::::::::+%:::::::::::::::::*::::::::+-:::::::::::==#:*:+*::*:::*::+@-:*=::::::::: ");
-        LogDebug("::::::::::::::::::::::::::#::::::::::::::::=::::::::#-::::::::::=@%===*-@@@@:-*@@#@-=*-:::::::::: ");
-        LogDebug("::::::::::::::::::::::::::::##:::::::::::::::::::::#=::::::#*:::::::::::::::::::::::::::::::::::: ");
-        LogDebug("                                                                                                    ");
-        
-        LogDebug("Plugin initialized");
-        LogDebug($"Hotkey set to: {Settings.TravelHotkey.Value}");
-        LogDebug($"Sound enabled: {Settings.PlaySound.Value}");
-        LogDebug($"Auto TP enabled: {Settings.AutoTp.Value}");
-        LogDebug($"GUI enabled: {Settings.ShowGui.Value}");
-        LogDebug("TP Cooldown: Using dynamic locking (locked until window loads or 10s timeout)");
-        LogDebug($"Move Mouse to Item enabled: {Settings.MoveMouseToItem.Value}");
+
+        LogMessage("                                                                                                    ");
+        LogMessage("::::::::::::::::::::::::::::::::::::::::::::::::::-*@@@@@@%+:::::*=::=-:::::::::::::::::::::::::: ");
+        LogMessage("::::::::::::::::::::::::::::::::::::::::::::::=@@@+*@@#=@*+*@#@@@%@+=@+%+::::::::::::::::::::::::: ");
+        LogMessage(":::::::::::::::::::::::::::::::::::::::::::+@@@=+::*@@@#*+**%+@%@@*@%@@@#:=+:::::::::::::::::::::: ");
+        LogMessage(":::::::::::::::::::::::::::::::::::::::::#@%-::-*@@*:::::::::::=#*@#%@@@*@@+:::::::::::::::::::::: ");
+        LogMessage("::::::::::::::::::::::::::::::::::::::-@@%:@:*@*:::::::::::::::::::::-@@+@#@::::::::::::::::::::: ");
+        LogMessage(":::::::::::::::::::::::::::::::::::::+@+@@=@%:::::::::::::::::::::::::::==::@*::::::::::::::::::: ");
+        LogMessage("::::::::::::::::::::::::::::::::::::=@*@-@*@:::::::::::::::::::::::::::::::::=@-::::::::::::::::: ");
+        LogMessage(":::::::::::::::::::::::::::::::::::=@-@@@%#@*::::::::::::::::::::::::::::::::::@::::::::::::::::: ");
+        LogMessage(":::::::::::::::::::::::::::::::::::%@=@@@#%@#+%+-%@::::::::::::::::::::::::::::+@:::::::::::::::: ");
+        LogMessage(":::::::::::::::::::::::::::::::::::@+%=@%#@*@@@#@@-:::::::::::::::::::::::::::::+*::::::::::::::: ");
+        LogMessage(":::::::::::::::::::::::::::::::::-@@@@@@@+@@%@*+=-=@*:::::::::::::::::::::::::::*%:::::::::::::: ");
+        LogMessage("::::::::::::::::::::::::::::::=@%-@@@%@@*@@@=@@@@@@*::::*@%:#@--+::::+@@@@@#::::::+#::::::::::::: ");
+        LogMessage(":::::::::::::::::::::::::::::*#*@+@%+@#@@#@%@@*%-=-::::%@#:*=@+*%@%=-::*@@@%-+@@:::@-:::::::::::: ");
+        LogMessage(":::::::::::::::::::::-*%@@@#-#%=@@@@*@@@@@@@@%#@@*@+::::-##@@@*@@@@@@@-:=:::+-:::::**-=:::::::::: ");
+        LogMessage("::::::::::::::::::*%*-:=:::::=%@@#@@*@@%@@##@#@@*=::::::@@@:::::::-+%@@@%*#@#*@#@@@+%@+:::::::::: ");
+        LogMessage("::::::::::::::::%*-:::::=%+::+@%@@@@@#+@@@@%%+*#::::-:::@:=:::@@@@@@@#:=@@@-+@@*%@@*:@::::::::::: ");
+        LogMessage(":::::::::::::::@::::::::::+*:::::@@-:---:=@@@@%-::==::#@%*-=*@@-=@++:@*:::+::-@@=-:%@%::::::::::: ");
+        LogMessage(":::::::::::::-@:::%-:::::::@-::::@--@=-+@@-:@@@-::::::***@@@@-#@@@@@@@@::@+::::@@@@-*+::::::::::: ");
+        LogMessage(":::::::::::::%:::=@:::::::::%:::=@:-@=:*@:%+@@::-:-+:::::::::-::-++@+=::::::::::::-@#:::::::::::: ");
+        LogMessage("::::::::::::@-:::@::::::::::@+::-@:-@*:@@:-=@@=:+++-::::::::::::::::::::::::::::::::*#::::::::::: ");
+        LogMessage(":::::::::::@::::=+::::::::::-@::+@=:%*:@@:-@@#=:=*=::::::::::::::::::::::::::::::::::-@:::::::::: ");
+        LogMessage("::::::::::@-::::@:::::::::::::@::@%*:::-:::@@@*=@==-::-:::::::::::::::::::::::::::::::=@::::::::: ");
+        LogMessage(":::::::::=@*:::-@:::::::::::::=@:@-+@:@@::-@@@%@@-@@%:@%*@@=:=+:::::::@@%-:-%%:::::::::##:::::::: ");
+        LogMessage(":::::::::*+%:::-@::::::::::::::#=@=:@+::::=@%+*@@=*@@%@:-:::-@*@==:+@@=::::::-@-:--:::::%:::::::: ");
+        LogMessage("::::::::=#:-#-*=@::::::::::::::-*%@:+%:::@@@#@#@@%@@*@@-#@+@=::-#@%+:%:=#*-::::=-=-:::::%:::::::: ");
+        LogMessage(":::::::-@:::::*-@:::::::::::::::@+@::#@@@@@@@@@@@@#%@#%%=%#*@%@%##@@*#%-@@@@@+::::::::::%:::::::: ");
+        LogMessage(":::::::+*:::::=+@=::::::::::::::*%@::-%=@@+@@@@%@@+*@@@@@@@@@@@%@@@#@+#@+@@#--%#:::::-::#+::::::: ");
+        LogMessage("::::::::%-:::::-+@%:::::::::::::::@@:::+@@#@@@%@@@*%*@@@@@*+@@@@@@@@@%@@@@@:@@@*#%@@=::::=%::::::: ");
+        LogMessage("::::::::*-:::::-++#:::::::::::::::*=::::%*@*@+@@*@=#@@@@@%=@@+-::::--:::::=::-@@@-::@@+::#=::::::: ");
+        LogMessage("::::::::##::::::#-#:::::::::::::::-%::::@-==@@@@@@@@%@@@=@=:@%:#@@@-::::::-::+@@=#=::::--::::::::: ");
+        LogMessage("::::::::#:::::::@:%::::::::::::::::@-::-:@*@*@#@@*+@=#@@@%:=:@@@-:#++@@@@@%#@*@=:::::::::::::::::: ");
+        LogMessage("::::::::@@::::::#-@::::::::::::::::*#::::=@#@@@@@%@%@@@@@*:*#:=@@#+@@#::=@#*@-:::::::::::::::::::: ");
+        LogMessage("::::::::-*:#=::::*#@:::::::::::::::::%-::@@-@@@@*@*@+@#@*@@-*#::=@@@#@%@@@*@=::::::::::::::::::::: ");
+        LogMessage("::::::::@-:::::::=#%=::::::::::::::::-@::@@@@*%@@-@@@@@@@@*@@+%@+:::::+@@@#:#@@:::::::::::::::::::: ");
+        LogMessage("::::::::-@-::::::::@=#:::::::::::::::::-@=*:=@#+##@@=@@@@@@@@@@@%@@*:::::::-#@#@@-:::::::::::::::::: ");
+        LogMessage("::::::::@%:::::::::#-%::::::::::::::::::=@:%-@@%#@#@@@@@+#@@=@@@@@@@@@@@@@@*@@@@++%#*%:::::::::::::: ");
+        LogMessage("::::::::%+%+::::::::=+#:::::::::::::::::::=%-*=%%%*#=@@=@#@@*@@@#@@@@@@@*@*@@@@@@#:=--@:::::::::::::: ");
+        LogMessage("::::::::@::+:::::::::@==:::::::::::::::::::*-*+*%@@@@#@@@@@%@@@%@@@@#@#%@@@@@+::::::+#::::::::::::::: ");
+        LogMessage("::::::=+:::::::::::::+*#::::::::::::::::::::#+@:*@+@@**@@@@@@@@@@@%@@@@@@%@@:::::*@==+%+*+-:::::::::: ");
+        LogMessage("::::::+=:::::::::::::%@-::::::::::::::::::::#*+:-@@*-@@=#@+@@@@@@#@@@%*@@@:::::-@+:::@:::=+::::::::: ");
+        LogMessage("::::::*-:::::::::::::+*-:::::::::::::::::::::@%::-#:@@@+@@@@#@@%@@+@=@@@-::::::-:@%-%=::-@@#:::::::: ");
+        LogMessage("::::::+-::::::::::::::@+=:::::::::::::::::::::*+*%=%:=@+@@@@+=@@@@@@@@%-=::::::::@@+::+=:::#@::::::: ");
+        LogMessage("::::::=+::::::::::::::+##+:::::::::::::::::::::%+*:=*@@:*@#@*@@@@#@@%:+::::::::::::::-+:::#@%::::::: ");
+        LogMessage("::::::::::::::::::::::#--::::::::::::::::::-@@%%#::#@%:=#@@@*:::::=%-::::::::::::*%-::+*#-::#:::::: ");
+        LogMessage("::::::::::::::::::::::@:::::::::::::::::=@%-::+@#*==-::::::::::::::@::::::%@=-=#@@@:::::::+*:::::: ");
+        LogMessage(":::::::::::::::::::::::%::::::::::::::::@=:::-*:::::::::::::::::::*=@:::::::::::::-::+@+-*%::::::: ");
+        LogMessage("::::::::::::::::::::::+#::::::::::::::::::::@-:::::::::::::::::::-**=:::+@@*@#%@*=@*@#@-#:::::::: ");
+        LogMessage(":::::::::::::::::::::::+*::::::::::::::::::*@:::::::::::::::::::::*+=::-@+-@:%+*-=*#=:-@-:::::::: ");
+        LogMessage("::::::::::::::::::::::::+%:::::::::::::::::*::::::::+-:::::::::::==#:*:+*::*:::*::+@-:*=::::::::: ");
+        LogMessage("::::::::::::::::::::::::::#::::::::::::::::=::::::::#-::::::::::=@%===*-@@@@:-*@@#@-=*-:::::::::: ");
+        LogMessage("::::::::::::::::::::::::::::##:::::::::::::::::::::#=::::::#*:::::::::::::::::::::::::::::::::::: ");
+        LogMessage("                                                                                                    ");
+
+        LogMessage("Plugin initialized");
+        LogMessage($"Hotkey set to: {Settings.TravelHotkey.Value}");
+        LogMessage($"Sound enabled: {Settings.PlaySound.Value}");
+        LogMessage($"Auto TP enabled: {Settings.AutoTp.Value}");
+        LogMessage($"GUI enabled: {Settings.ShowGui.Value}");
+        LogMessage("TP Cooldown: Using dynamic locking (locked until window loads or 10s timeout)");
+        LogMessage($"Move Mouse to Item enabled: {Settings.MoveMouseToItem.Value}");
 
         return true;
     }
@@ -210,21 +192,37 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     public override void AreaChange(AreaInstance area)
     {
-        LogDebug($"🌍 AREA CHANGE: {area?.Area?.Name ?? "Unknown"} - NOT stopping listeners (live searches continue)");
+        LogMessage($"🌍 AREA CHANGE: {area?.Area?.Name ?? "Unknown"} - NOT stopping listeners (live searches continue)");
         _lastAreaChangeTime = DateTime.Now;
-        _lastTeleportTime = DateTime.Now; // Set teleport delay after area change
-        
+
         // DON'T stop all listeners - let them continue running
         // Live searches should persist across zone changes
-        // DON'T clear recent items - let the user manage them manually
-        // Items can still be valid across zone changes (especially to/from hideout)
-        
+        // Only clear recent items as they're location-specific
+        _recentItems.Clear();
         // DON'T clear _teleportedItemLocation - we need it to persist until purchase window opens
-        LogDebug("🌍 AREA CHANGE: Keeping recent items list intact for user to manage");
-        LogDebug("⏳ TELEPORT DELAY: 2 second delay after area change to allow item purchase");
+        LogMessage("📦 Cleared recent items due to area change (preserved teleported location for mouse movement)");
     }
 
+    // LearnPurchaseWindowCoordinates method
+    private void LearnPurchaseWindowCoordinates(int x, int y)
+    {
+        try
+        {
+            LogMessage($"🎓 LEARNING COORDINATES: Storing purchase window coordinates ({x}, {y})");
+            Settings.PurchaseWindowX.Value = x;
+            Settings.PurchaseWindowY.Value = y;
+            Settings.HasLearnedPurchaseWindow.Value = true;
+            LogMessage($"✅ COORDINATES LEARNED: Purchase window coordinates saved for future instant mouse movement");
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ LEARNING FAILED: Could not save purchase window coordinates: {ex.Message}");
+        }
+    }
 
+    // MoveMouseToLearnedPosition method moved to JewYourItem.Teleport.cs
+
+    // MoveMouseToCalculatedPosition method moved to JewYourItem.Teleport.cs
 
     // PlaySoundWithNAudio method moved to JewYourItem.Teleport.cs
 
@@ -234,19 +232,84 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         return Input.GetKeyState(key);
     }
 
+    // Logging helper methods
+    private void LogDebug(string message)
+    {
+        if (Settings.DebugMode.Value)
+        {
+            LogMessage($"[DEBUG] {message}");
+        }
+    }
+
+    private void LogInfo(string message)
+    {
+        LogMessage($"[INFO] {message}");
+    }
+
+    private void LogWarning(string message)
+    {
+        LogMessage($"[WARNING] {message}");
+    }
+
+    // Process connection queue method
+    private void ProcessConnectionQueue()
+    {
+        if (_connectionQueue.Count == 0) return;
+
+        // Check if enough time has passed since last connection
+        if ((DateTime.Now - _lastConnectionTime).TotalMilliseconds < ConnectionDelayMs)
+            return;
+
+        var config = _connectionQueue.Dequeue();
+        _lastConnectionTime = DateTime.Now;
+
+        // Final duplicate check
+        if (_listeners.Any(l => l.Config.League.Value == config.League.Value &&
+                               l.Config.SearchId.Value == config.SearchId.Value))
+        {
+            LogMessage($"🛡️ QUEUE SKIP: Listener already exists for {config.SearchId.Value}");
+            return;
+        }
+
+        var newListener = new SearchListener(this, config, LogMessage, LogError);
+        _listeners.Add(newListener);
+        LogMessage($"🆕 STARTING FROM QUEUE: Search {config.SearchId.Value}");
+        newListener.Start(LogMessage, LogError, Settings.SessionId.Value);
+    }
+
     public override async void Tick()
     {
         // CRITICAL: IMMEDIATE PLUGIN DISABLE CHECK - HIGHEST PRIORITY
         if (!Settings.Enable.Value)
         {
-            LogDebug("🛑 PLUGIN DISABLED: Stopping all listeners immediately");
+            LogMessage("🛑 PLUGIN DISABLED: Stopping all listeners immediately");
             ForceStopAll();
             return;
         }
 
-        // REMOVED: Emergency shutdown check - no longer needed since system is stable
+        // EMERGENCY SHUTDOWN CHECK - use throttling instead of shutdown
+        if (JewYourItem._emergencyShutdown)
+        {
+            // Instead of disabling plugin, just log and wait for cooldown
+            LogError("⚠️ CONNECTION THROTTLING: Global connection limit reached, waiting for cooldown...");
 
-        // Note: Removed TP lock timeout check - now using loading screen check instead
+            // Reset emergency shutdown after time
+            if ((DateTime.Now - _pluginStartTime).TotalMinutes >= 5)
+            {
+                LogMessage("🔄 Resetting emergency shutdown state after 5 minutes");
+                JewYourItem._emergencyShutdown = false;
+                JewYourItem._globalConnectionAttempts = 0;
+            }
+            return;
+        }
+
+        // CRITICAL: Check TP lock timeout to prevent infinite locks
+        if (_tpLocked && (DateTime.Now - _tpLockedTime).TotalSeconds >= 10)
+        {
+            LogMessage("🔓 TP UNLOCKED: 10-second timeout reached in Tick(), unlocking TP");
+            _tpLocked = false;
+            _tpLockedTime = DateTime.MinValue;
+        }
 
         // Ensure rate limiter is initialized
         if (_rateLimiter == null)
@@ -260,68 +323,10 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             _lastEnableState = Settings.Enable.Value;
             if (!Settings.Enable.Value)
             {
-                LogDebug("🛑 PLUGIN JUST DISABLED: Force stopping all listeners");
+                LogMessage("🛑 PLUGIN JUST DISABLED: Force stopping all listeners");
                 ForceStopAll();
                 return;
             }
-        }
-
-        // CRITICAL: Mouse movement logic runs every tick for instant response
-        // This must be outside any throttling to ensure immediate mouse movement
-        if (Settings.Enable.Value)
-        {
-            bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
-            bool isGameLoading = GameController.IsLoading;
-            
-            // Track when purchase window closes or game starts loading
-            if (!currentPurchaseWindowVisible && _lastPurchaseWindowVisible)
-            {
-                LogMessage($"🚪 PURCHASE WINDOW CLOSED: Ready to move mouse on next window open. HasLocation: {_teleportedItemLocation.HasValue}");
-            }
-            else if (isGameLoading && _teleportedItemLocation.HasValue)
-            {
-                LogMessage($"⏳ GAME LOADING: Ready to move mouse on next window open. HasLocation: {_teleportedItemLocation.HasValue}");
-            }
-            
-            // Move mouse when purchase window is open and we have a teleported item
-            if (currentPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _teleportedItemLocation.HasValue)
-            {
-                // Check if this is a new window opening or if we have a new teleported item
-                bool isNewWindowOpen = !_lastPurchaseWindowVisible;
-                
-                if (!_mouseMovementLogged)
-                {
-                    if (isNewWindowOpen)
-                    {
-                        LogMessage($"🖱️ PURCHASE WINDOW OPENED: MoveMouseToItem = {Settings.MoveMouseToItem.Value}");
-                    }
-                    else
-                    {
-                        LogMessage($"🖱️ PURCHASE WINDOW ALREADY OPEN: Moving mouse to new teleported item");
-                    }
-                    
-                    LogInfo($"🎯 MOUSE MOVE: Moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
-                    _mouseMovementLogged = true;
-                }
-                
-                MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
-                _teleportedItemLocation = null; // Clear after successful mouse movement
-                _mouseMovementLogged = false; // Reset for next item
-            }
-            else if (currentPurchaseWindowVisible && Settings.MoveMouseToItem.Value && !_teleportedItemLocation.HasValue)
-            {
-                LogDebug($"🎯 MOUSE MOVE SKIPPED: Purchase window open but no teleported item location available");
-            }
-            else if (!currentPurchaseWindowVisible && Settings.MoveMouseToItem.Value && _teleportedItemLocation.HasValue)
-            {
-                LogDebug($"🎯 MOUSE MOVE WAITING: Purchase window closed, waiting for it to open to move mouse to ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
-            }
-            else if (!Settings.MoveMouseToItem.Value)
-            {
-                LogDebug($"🎯 MOUSE MOVE DISABLED: MoveMouseToItem setting is disabled");
-            }
-            
-            _lastPurchaseWindowVisible = currentPurchaseWindowVisible;
         }
 
         // CRITICAL: Throttle listener management EXCEPT for immediate settings changes
@@ -334,12 +339,69 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 bool hotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
                 if (hotkeyState && !_lastHotkeyState)
                 {
-                    LogDebug($"Hotkey {Settings.TravelHotkey.Value} pressed");
+                    LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
                     TravelToHideout(isManual: true);
                 }
                 _lastHotkeyState = hotkeyState;
+
+                // Check if purchase window just became visible and move mouse to teleported item
+                bool purchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
+
+                // Track window close events (throttled)
+                if (!purchaseWindowVisible && _lastPurchaseWindowVisible)
+                {
+                    LogMessage("🚪 PURCHASE WINDOW CLOSED (Throttled): Mouse movement will be allowed on next window open");
+                    _windowWasClosedSinceLastMovement = true;
+                    _allowMouseMovement = true;
+                }
+
+                if (purchaseWindowVisible && !_lastPurchaseWindowVisible)
+                {
+                    LogMessage($"🖱️ PURCHASE WINDOW OPENED (Throttled): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
+
+                    // Unlock TP when purchase window opens
+                    if (_tpLocked)
+                    {
+                        LogMessage("🔓 TP UNLOCKED (Throttled): Purchase window opened successfully");
+                        _tpLocked = false;
+                        _tpLockedTime = DateTime.MinValue;
+                    }
+
+                    // Learn purchase window coordinates for future instant mouse movement
+                    if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
+                    {
+                        LogMessage($"🎓 LEARNING TRIGGER (Throttled): Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                        LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                    }
+                }
+                if (purchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
+                {
+                    if (_allowMouseMovement && _windowWasClosedSinceLastMovement)
+                    {
+                        if (_teleportedItemLocation.HasValue)
+                        {
+                            LogMessage($"🖱️ SAFE MOUSE MOVE (Throttled): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                            MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                            _teleportedItemLocation = null; // Clear after use
+                            _allowMouseMovement = false; // Block further movement until window closes
+                            _windowWasClosedSinceLastMovement = false;
+                        }
+                        else if (_recentItems.Count > 0)
+                        {
+                            LogMessage("🖱️ SAFE FALLBACK MOVE (Throttled): Window was closed, using most recent item");
+                            var item = _recentItems.Peek();
+                            MoveMouseToItemLocation(item.X, item.Y);
+                            _allowMouseMovement = false; // Block further movement until window closes
+                            _windowWasClosedSinceLastMovement = false;
+                        }
+                    }
+                    else
+                    {
+                        LogMessage("🚫 MOUSE MOVE BLOCKED (Throttled): Purchase window opened but previous window was not closed (preventing accidental purchases)");
+                    }
+                }
+                _lastPurchaseWindowVisible = purchaseWindowVisible;
             }
-            // NOTE: Mouse movement logic moved outside throttling for instant response
             return; // Skip listener management
         }
 
@@ -350,31 +412,76 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             // Only log once to avoid spam
             if (!_areaChangeCooldownLogged)
             {
-                LogDebug($"🌍 AREA CHANGE COOLDOWN: Skipping listener management for 5s after area change (can be overridden by settings changes)");
+                LogMessage($"🌍 AREA CHANGE COOLDOWN: Skipping listener management for 5s after area change (can be overridden by settings changes)");
                 _areaChangeCooldownLogged = true;
             }
-            
+
             // ONLY process basic functionality IF plugin is enabled
             if (Settings.Enable.Value)
             {
                 bool areaChangeHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
                 if (areaChangeHotkeyState && !_lastHotkeyState)
                 {
-                    LogDebug($"Hotkey {Settings.TravelHotkey.Value} pressed");
+                    LogMessage($"Hotkey {Settings.TravelHotkey.Value} pressed");
                     TravelToHideout(isManual: true);
                 }
                 _lastHotkeyState = areaChangeHotkeyState;
 
                 bool areaChangePurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
-                
+
                 // Track window close events (area change)
                 if (!areaChangePurchaseWindowVisible && _lastPurchaseWindowVisible)
                 {
-                    LogDebug("🚪 PURCHASE WINDOW CLOSED (Area): Mouse movement will be allowed on next window open");
+                    LogMessage("🚪 PURCHASE WINDOW CLOSED (Area): Mouse movement will be allowed on next window open");
                     _windowWasClosedSinceLastMovement = true;
                     _allowMouseMovement = true;
                 }
-                
+
+                if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible)
+                {
+                    LogMessage($"🖱️ PURCHASE WINDOW OPENED (Area): MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
+
+                    // Unlock TP when purchase window opens
+                    if (_tpLocked)
+                    {
+                        LogMessage("🔓 TP UNLOCKED (Area): Purchase window opened successfully");
+                        _tpLocked = false;
+                        _tpLockedTime = DateTime.MinValue;
+                    }
+
+                    // Learn purchase window coordinates for future instant mouse movement
+                    if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
+                    {
+                        LogMessage($"🎓 LEARNING TRIGGER (Area): Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                        LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                    }
+                }
+                if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
+                {
+                    if (_allowMouseMovement && _windowWasClosedSinceLastMovement)
+                    {
+                        if (_teleportedItemLocation.HasValue)
+                        {
+                            LogMessage($"🖱️ SAFE MOUSE MOVE (Area): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                            MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                            _teleportedItemLocation = null; // Clear after use
+                            _allowMouseMovement = false; // Block further movement until window closes
+                            _windowWasClosedSinceLastMovement = false;
+                        }
+                        else if (_recentItems.Count > 0)
+                        {
+                            LogMessage("🖱️ SAFE FALLBACK MOVE (Area): Window was closed, using most recent item");
+                            var item = _recentItems.Peek();
+                            MoveMouseToItemLocation(item.X, item.Y);
+                            _allowMouseMovement = false; // Block further movement until window closes
+                            _windowWasClosedSinceLastMovement = false;
+                        }
+                    }
+                    else
+                    {
+                        LogMessage("🚫 MOUSE MOVE BLOCKED (Area): Purchase window opened but previous window was not closed (preventing accidental purchases)");
+                    }
+                }
                 _lastPurchaseWindowVisible = areaChangePurchaseWindowVisible;
             }
             return;
@@ -386,57 +493,119 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         }
 
         _lastTickProcessTime = DateTime.Now;
-        
-        // Periodic reset of global connection attempts (every 5 minutes)
-        if ((DateTime.Now - _lastGlobalReset).TotalMinutes >= 5 && JewYourItem._globalConnectionAttempts > 0)
+
+        // Process connection queue first
+        ProcessConnectionQueue();
+
+        // Periodic reset of global connection attempts (every 2 minutes)
+        if ((DateTime.Now - _lastGlobalReset).TotalMinutes >= 2)
         {
-            LogDebug($"🔄 PERIODIC RESET: Clearing global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) after 5 minutes");
-            JewYourItem._globalConnectionAttempts = 0;
-            _lastGlobalReset = DateTime.Now;
+            if (JewYourItem._globalConnectionAttempts > 0)
+            {
+                LogMessage($"🔄 PERIODIC RESET: Clearing global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) after 2 minutes");
+                JewYourItem._globalConnectionAttempts = 0;
+                _lastGlobalReset = DateTime.Now;
+
+                // Unblock all blocked listeners
+                foreach (var listener in _listeners.Where(l => !l.IsRunning && !l.IsConnecting))
+                {
+                    LogMessage($"🔄 UNBLOCKING: Search {listener.Config.SearchId.Value} after global reset");
+                }
+            }
         }
-        
+
         if (recentSettingsChange)
         {
-            LogDebug("🔄 TICK: Processing listener management (INSTANT - settings changed)...");
+            LogMessage("🔄 TICK: Processing listener management (INSTANT - settings changed)...");
         }
         else
         {
-            LogDebug("🔄 TICK: Processing listener management...");
+            LogMessage("🔄 TICK: Processing listener management...");
         }
 
         bool currentHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
         if (currentHotkeyState && !_lastHotkeyState)
         {
-            LogInfo($"🎮 MANUAL HOTKEY PRESSED: {Settings.TravelHotkey.Value} - initiating manual teleport");
+            LogMessage($"🎮 MANUAL HOTKEY PRESSED: {Settings.TravelHotkey.Value} - initiating manual teleport");
             TravelToHideout(isManual: true);
         }
         _lastHotkeyState = currentHotkeyState;
 
-        // Check Stop All hotkey - moved outside throttling for instant response
-        bool currentStopAllState = Input.GetKeyState(Settings.StopAllHotkey.Value);
-        if (currentStopAllState && !_lastStopAllState)
-        {
-            LogMessage($"🛑 STOP ALL HOTKEY PRESSED: {Settings.StopAllHotkey.Value} - force stopping all searches");
-            ForceStopAll();
-            LogMessage("🛑 ALL SEARCHES STOPPED: Stop All hotkey pressed");
-        }
-        else if (currentStopAllState && _lastStopAllState)
-        {
-            LogDebug($"🛑 STOP ALL HOTKEY HELD: {Settings.StopAllHotkey.Value} (already pressed)");
-        }
-        _lastStopAllState = currentStopAllState;
+        // Check if purchase window just became visible and learn coordinates + move mouse to teleported item
+        bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
 
-        // Mouse movement logic moved to top of Tick method for instant response
+        // Track window close events to allow mouse movement on next open
+        if (!currentPurchaseWindowVisible && _lastPurchaseWindowVisible)
+        {
+            LogMessage("🚪 PURCHASE WINDOW CLOSED: Mouse movement will be allowed on next window open");
+            _windowWasClosedSinceLastMovement = true;
+            _allowMouseMovement = true;
+        }
+
+        if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible)
+        {
+            LogMessage($"🖱️ PURCHASE WINDOW OPENED: MoveMouseToItem = {Settings.MoveMouseToItem.Value}, TeleportedLocation = {(_teleportedItemLocation.HasValue ? $"({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})" : "null")}, AllowMovement = {_allowMouseMovement}");
+
+            // Unlock TP when purchase window opens
+            if (_tpLocked)
+            {
+                LogMessage("🔓 TP UNLOCKED: Purchase window opened successfully");
+                _tpLocked = false;
+                _tpLockedTime = DateTime.MinValue;
+            }
+
+            // Learn purchase window coordinates for future instant mouse movement
+            if (!Settings.HasLearnedPurchaseWindow.Value && _teleportedItemLocation.HasValue)
+            {
+                LogMessage($"🎓 LEARNING TRIGGER: Purchase window opened, learning coordinates from teleported location ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                LearnPurchaseWindowCoordinates(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+            }
+            else if (Settings.HasLearnedPurchaseWindow.Value)
+            {
+                LogMessage($"🎓 ALREADY LEARNED: Using stored coordinates ({Settings.PurchaseWindowX.Value}, {Settings.PurchaseWindowY.Value})");
+            }
+            else if (!_teleportedItemLocation.HasValue)
+            {
+                LogMessage("🎓 LEARNING SKIPPED: No teleported item location available for learning");
+            }
+        }
+        if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
+        {
+            if (_allowMouseMovement && _windowWasClosedSinceLastMovement)
+            {
+                if (_teleportedItemLocation.HasValue)
+                {
+                    LogMessage($"🖱️ SAFE MOUSE MOVE (Main): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                    MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                    _teleportedItemLocation = null; // Clear after use
+                    _allowMouseMovement = false; // Block further movement until window closes
+                    _windowWasClosedSinceLastMovement = false;
+                }
+                else if (_recentItems.Count > 0)
+                {
+                    LogMessage("🖱️ SAFE FALLBACK MOVE (Main): Window was closed, using most recent item");
+                    var item = _recentItems.Peek();
+                    MoveMouseToItemLocation(item.X, item.Y);
+                    _allowMouseMovement = false; // Block further movement until window closes
+                    _windowWasClosedSinceLastMovement = false;
+                }
+            }
+            else
+            {
+                LogMessage("🚫 MOUSE MOVE BLOCKED (Main): Purchase window opened but previous window was not closed (preventing accidental purchases)");
+            }
+        }
+        _lastPurchaseWindowVisible = currentPurchaseWindowVisible;
 
         var allConfigs = Settings.Groups
             .Where(g => g.Enable.Value)
             .SelectMany(g => g.Searches.Where(s => s.Enable.Value))
             .ToList();
 
-        if (allConfigs.Count > 20)
+        if (allConfigs.Count > 30)
         {
-            LogError("Exceeded max 20 searches; disabling extras.");
-            allConfigs = allConfigs.Take(20).ToList();
+            LogError("Exceeded max 30 searches; disabling extras.");
+            allConfigs = allConfigs.Take(30).ToList();
         }
 
         // Create a set of active config identifiers for comparison
@@ -452,16 +621,21 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             _lastActiveConfigsHash = currentConfigsHash;
             _lastSettingsChangeTime = DateTime.Now;
             LogMessage($"🔄 SETTINGS CHANGED: Config changed from {_listeners.Count} to {allConfigs.Count} searches - processing immediately");
-            
+
             // Reset global attempts for user actions to allow fresh start
             if (JewYourItem._globalConnectionAttempts > 0)
             {
                 LogMessage($"🔄 SETTINGS RESET: Clearing global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) for fresh start");
                 JewYourItem._globalConnectionAttempts = 0;
             }
-            
-            // REMOVED: Emergency shutdown reset - no longer needed
-            
+
+            // Reset emergency shutdown on settings change (user is actively configuring)
+            if (JewYourItem._emergencyShutdown)
+            {
+                LogMessage($"🔄 EMERGENCY RESET: Settings changed - clearing emergency shutdown state");
+                JewYourItem._emergencyShutdown = false;
+            }
+
             // IMMEDIATE CLEANUP: Remove duplicates and disabled listeners first
             var currentListenerIds = _listeners.Select(l => $"{l.Config.League.Value}|{l.Config.SearchId.Value}").ToList();
             LogMessage($"🔍 CURRENT LISTENERS: {string.Join(", ", currentListenerIds)}");
@@ -479,11 +653,11 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             // When settings changed, do immediate cleanup of duplicates and disabled listeners
             LogMessage($"🧹 IMMEDIATE CLEANUP: Processing settings change for {allConfigs.Count} target configs");
             StopDisabledListeners();
-            
+
             // Clean up any existing duplicates immediately
             var duplicateGroups = _listeners.GroupBy(l => $"{l.Config.League.Value}|{l.Config.SearchId.Value}")
                 .Where(g => g.Count() > 1).ToList();
-            
+
             foreach (var group in duplicateGroups)
             {
                 var duplicates = group.Skip(1).ToList();
@@ -500,219 +674,23 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         foreach (var listener in _listeners.ToList())
         {
             var listenerId = $"{listener.Config.League.Value}|{listener.Config.SearchId.Value}";
-            
-            // Check if the search itself is disabled OR its parent group is disabled
-            bool searchStillActive = false;
-            foreach (var group in Settings.Groups)
-            {
-                if (!group.Enable.Value) continue; // Group disabled - skip all its searches
-                
-                foreach (var search in group.Searches)
-                {
-                    if (search.Enable.Value && 
-                        search.League.Value == listener.Config.League.Value && 
-                        search.SearchId.Value == listener.Config.SearchId.Value)
-                    {
-                        searchStillActive = true;
-                        break;
-                    }
-                }
-                if (searchStillActive) break;
-            }
-            
-            if (!searchStillActive || !activeConfigIds.Contains(listenerId))
-            {
-                listener.Stop();
-                _listeners.Remove(listener);
-                LogMessage($"🛑 DISABLED: Stopped listener for disabled search/group: {listener.Config.SearchId.Value}");
-            }
-            else if (!listener.IsRunning && !listener.IsConnecting)
-            {
-                // Multiple safety checks before attempting restart - use shorter cooldown for auth errors
-                double cooldownSeconds = listener.IsAuthenticationError ? 10 : RestartCooldownSeconds; // 10 seconds for auth errors, 300 for others
-                LogDebug($"🔍 COOLDOWN CHECK: Search {listener.Config.SearchId.Value}, IsAuthError={listener.IsAuthenticationError}, UsingCooldown={cooldownSeconds}s");
-                if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < cooldownSeconds)
-                {
-                    if (listener.IsAuthenticationError)
-                    {
-                        LogDebug($"🔐 AUTH ERROR COOLDOWN: Search {listener.Config.SearchId.Value} waiting for session ID fix ({cooldownSeconds - (DateTime.Now - listener.LastErrorTime).TotalSeconds:F1}s remaining)");
-                    }
-                    else
-                    {
-                        LogDebug($"🛡️ RESTART BLOCKED: Search {listener.Config.SearchId.Value} in error cooldown ({cooldownSeconds - (DateTime.Now - listener.LastErrorTime).TotalSeconds:F1}s remaining)");
-                    }
-                    continue;
-                }
 
-                if ((DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 60)
-                {
-                    LogDebug($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} connection throttled ({60 - (DateTime.Now - listener.LastConnectionAttempt).TotalSeconds:F1}s remaining)");
-                    continue;
-                }
-
-                if (listener.ConnectionAttempts >= 2 && (DateTime.Now - listener.LastConnectionAttempt).TotalHours < 1)
-                {
-                    LogDebug($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded restart attempts (2 per HOUR)");
-                    continue;
-                }
-
-                if (listener.ConnectionAttempts >= 5)
-                {
-                    LogDebug($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded TOTAL session restart limit (5 EVER)");
-                    continue;
-                }
-
-                // REMOVED: Rate limiting for WebSocket restarts to make reconnection instant
-                
-                LogMessage($"🔄 ATTEMPTING RESTART: Search {listener.Config.SearchId.Value}");
-                listener.Start(LogMessage, LogError, Settings.SessionId.Value);
-            }
-        }
-
-        // Start new listeners for enabled searches
-        foreach (var config in allConfigs)
-        {
-            var configId = $"{config.League.Value}|{config.SearchId.Value}";
-            
-            // CRITICAL: Comprehensive duplicate detection
-            var existingListeners = _listeners.Where(l => 
-                l.Config.League.Value == config.League.Value && 
-                l.Config.SearchId.Value == config.SearchId.Value).ToList();
-            
-            if (existingListeners.Count > 1)
-            {
-                // REMOVE EXTRA DUPLICATES
-                LogMessage($"🚨 DUPLICATE CLEANUP: Found {existingListeners.Count} listeners for {config.SearchId.Value}, removing {existingListeners.Count - 1} extras");
-                for (int i = 1; i < existingListeners.Count; i++)
-                {
-                    existingListeners[i].Stop();
-                    _listeners.Remove(existingListeners[i]);
-                }
-                LogMessage($"✅ CLEANED UP: Removed {existingListeners.Count - 1} duplicate listeners for {config.SearchId.Value}");
-            }
-            
-            var existingListener = existingListeners.FirstOrDefault();
-            
-            if (existingListener == null)
-            {
-                // FINAL CHECK: Ensure absolutely no duplicates
-                var finalDuplicateCheck = _listeners.Any(l => 
-                l.Config.League.Value == config.League.Value && 
-                l.Config.SearchId.Value == config.SearchId.Value);
-            
-                if (finalDuplicateCheck)
-                {
-                    LogMessage($"🛡️ FINAL DUPLICATE PREVENTION: Listener already exists for {config.SearchId.Value}");
-                    continue;
-                }
-                
-                // REMOVED: Emergency shutdown logic - no longer needed since system is stable
-                // The 20-search limit above provides sufficient protection
-                
-                // REMOVED: All rate limiting for listener creation to make startup instant
-                LogDebug($"⚡ INSTANT START: No rate limiting for maximum speed");
-                
-                // FINAL SAFETY CHECK: Ensure no duplicate was created during processing
-                var lastMinuteCheck = _listeners.Any(l => 
-                    l.Config.League.Value == config.League.Value && 
-                    l.Config.SearchId.Value == config.SearchId.Value);
-                
-                if (lastMinuteCheck)
-                {
-                    LogMessage($"🛡️ LAST MINUTE PREVENTION: Duplicate detected right before creation for {config.SearchId.Value}");
-                    continue;
-                }
-                
-                var newListener = new SearchListener(this, config, LogMessage, LogError, LogDebug, LogInfo, LogWarning);
-                _listeners.Add(newListener);
-                LogMessage($"🆕 CREATING NEW LISTENER: Search {config.SearchId.Value} (Total listeners: {_listeners.Count})");
-                newListener.Start(LogMessage, LogError, Settings.SessionId.Value);
-            }
-            else
-            {
-                LogDebug($"📍 EXISTING LISTENER: {config.SearchId.Value} (Running: {existingListener.IsRunning}, Connecting: {existingListener.IsConnecting})");
-            }
-        }
-    }
-
-    // Render method moved to JewYourItem.Gui.cs
-
-    private void StopAll()
-    {
-        LogMessage($"🛑 STOPPING ALL: {_listeners.Count} listeners");
-        foreach (var listener in _listeners)
-        {
-            LogMessage($"🛑 STOPPING: Search {listener.Config.SearchId.Value}");
-            listener.Stop();
-        }
-        _listeners.Clear();
-        LogMessage("✅ ALL LISTENERS STOPPED");
-    }
-
-    private void ForceStopAll()
-    {
-        LogMessage("🚨 FORCE STOPPING: All listeners...");
-        LogMessage($"📊 Current listener count: {_listeners.Count}");
-        
-        // Create a copy of the list to avoid modification during iteration
-        var listenersToStop = _listeners.ToList();
-        LogMessage($"📋 Listeners to stop: {listenersToStop.Count}");
-        
-        foreach (var listener in listenersToStop)
-        {
-            try
-            {
-                LogMessage($"🛑 STOPPING: Search {listener.Config.SearchId.Value} (Running: {listener.IsRunning}, Connecting: {listener.IsConnecting})");
-                listener.Stop();
-                LogMessage($"✅ STOPPED: Search {listener.Config.SearchId.Value}");
-            }
-            catch (Exception ex)
-            {
-                LogError($"❌ Error stopping listener {listener.Config.SearchId.Value}: {ex.Message}");
-            }
-        }
-        
-        // Clear the listeners list
-        _listeners.Clear();
-        
-        // Force immediate GUI update by clearing any pending state
-        _lastActiveConfigsHash = "";
-        
-        // Clear recent items
-        lock (_recentItemsLock)
-        {
-            _recentItems.Clear();
-        }
-        
-        // Reset global connection attempts
-        _globalConnectionAttempts = 0;
-        
-        // Disable the plugin to prevent immediate restart
-        Settings.Enable.Value = false;
-        
-        LogMessage("✅ All listeners force stopped - plugin fully disabled.");
-    }
-
-    private void StopDisabledListeners()
-    {
-        var listenersToRemove = new List<SearchListener>();
-        
-        foreach (var listener in _listeners.ToList())
-        {
             // Check if the search itself is disabled OR its parent group is disabled
             bool searchStillActive = false;
             bool foundMatchingConfig = false;
             string disableReason = "";
-            
+
             foreach (var group in Settings.Groups)
             {
+                if (!group.Enable.Value) continue; // Group disabled - skip all its searches
+
                 foreach (var search in group.Searches)
                 {
-                    if (search.League.Value == listener.Config.League.Value && 
+                    if (search.League.Value == listener.Config.League.Value &&
                         search.SearchId.Value == listener.Config.SearchId.Value)
                     {
                         foundMatchingConfig = true;
-                        
+
                         // CRITICAL: Group disable overrides everything
                         if (!group.Enable.Value)
                         {
@@ -733,7 +711,208 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 }
                 if (foundMatchingConfig) break;
             }
-            
+
+            // If we didn't find the config at all, or it's disabled, stop the listener
+            if (!foundMatchingConfig || !searchStillActive)
+            {
+                if (!foundMatchingConfig)
+                {
+                    disableReason = "config not found";
+                }
+                LogMessage($"🛑 DISABLING: {listener.Config.SearchId.Value} - {disableReason}");
+                listener.Stop();
+                _listeners.Remove(listener);
+            }
+            else if (!listener.IsRunning && !listener.IsConnecting)
+            {
+                // Check global throttling first
+                if (JewYourItem._globalConnectionAttempts >= 3)
+                {
+                    int globalWait = 5000 * (JewYourItem._globalConnectionAttempts - 2);
+                    LogMessage($"🌐 GLOBAL THROTTLE: Skipping restart due to global attempts ({JewYourItem._globalConnectionAttempts}), waiting {globalWait}ms");
+                    continue;
+                }
+
+                // Multiple safety checks before attempting restart
+                if ((DateTime.Now - listener.LastErrorTime).TotalSeconds < RestartCooldownSeconds)
+                {
+                    LogMessage($"🛡️ RESTART BLOCKED: Search {listener.Config.SearchId.Value} in error cooldown ({RestartCooldownSeconds - (DateTime.Now - listener.LastErrorTime).TotalSeconds:F1}s remaining)");
+                    continue;
+                }
+
+                if ((DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 60)
+                {
+                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} connection throttled ({60 - (DateTime.Now - listener.LastConnectionAttempt).TotalSeconds:F1}s remaining)");
+                    continue;
+                }
+
+                if (listener.ConnectionAttempts >= 2 && (DateTime.Now - listener.LastConnectionAttempt).TotalHours < 1)
+                {
+                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded restart attempts (2 per HOUR)");
+                    continue;
+                }
+
+                if (listener.ConnectionAttempts >= 5)
+                {
+                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded TOTAL session restart limit (5 EVER)");
+                    continue;
+                }
+
+                // Use delay for retries instead of immediate restart
+                if (listener.ConnectionAttempts > 0)
+                {
+                    int delayMs = 1000 * (int)Math.Pow(2, listener.ConnectionAttempts - 1);
+                    delayMs = Math.Min(delayMs, 30000); // Max 30 seconds
+
+                    if ((DateTime.Now - listener.LastConnectionAttempt).TotalMilliseconds < delayMs)
+                    {
+                        LogMessage($"⏳ DELAYED RESTART: Search {listener.Config.SearchId.Value} waiting {delayMs - (DateTime.Now - listener.LastConnectionAttempt).TotalMilliseconds:F0}ms");
+                        continue;
+                    }
+                }
+
+                LogMessage($"🔄 ATTEMPTING RESTART: Search {listener.Config.SearchId.Value}");
+                listener.Start(LogMessage, LogError, Settings.SessionId.Value);
+            }
+        }
+
+        // Start new listeners for enabled searches - add to queue instead of immediate start
+        foreach (var config in allConfigs)
+        {
+            var configId = $"{config.League.Value}|{config.SearchId.Value}";
+
+            // CRITICAL: Comprehensive duplicate detection
+            var existingListeners = _listeners.Where(l =>
+                l.Config.League.Value == config.League.Value &&
+                l.Config.SearchId.Value == config.SearchId.Value).ToList();
+
+            if (existingListeners.Count > 1)
+            {
+                // REMOVE EXTRA DUPLICATES
+                LogMessage($"🚨 DUPLICATE CLEANUP: Found {existingListeners.Count} listeners for {config.SearchId.Value}, removing {existingListeners.Count - 1} extras");
+                for (int i = 1; i < existingListeners.Count; i++)
+                {
+                    existingListeners[i].Stop();
+                    _listeners.Remove(existingListeners[i]);
+                }
+                LogMessage($"✅ CLEANED UP: Removed {existingListeners.Count - 1} duplicate listeners for {config.SearchId.Value}");
+            }
+
+            var existingListener = existingListeners.FirstOrDefault();
+
+            if (existingListener == null)
+            {
+                // FINAL CHECK: Ensure absolutely no duplicates
+                var finalDuplicateCheck = _listeners.Any(l =>
+                    l.Config.League.Value == config.League.Value &&
+                    l.Config.SearchId.Value == config.SearchId.Value);
+
+                if (finalDuplicateCheck)
+                {
+                    LogMessage($"🛡️ FINAL DUPLICATE PREVENTION: Listener already exists for {config.SearchId.Value}");
+                    continue;
+                }
+
+                // EMERGENCY: Prevent rapid creation (but allow user-initiated restarts)
+                if (JewYourItem._globalConnectionAttempts >= 5 && !recentSettingsChange)
+                {
+                    LogMessage($"🚨 EMERGENCY: Preventing new listener creation - global limit reached ({JewYourItem._globalConnectionAttempts} attempts)");
+                    continue;
+                }
+                else if (recentSettingsChange && JewYourItem._globalConnectionAttempts >= 1)
+                {
+                    // Reset global attempts for user-initiated changes (more forgiving)
+                    LogMessage($"🔄 USER ACTION: Resetting global connection attempts ({JewYourItem._globalConnectionAttempts} -> 0) for settings change");
+                    JewYourItem._globalConnectionAttempts = 0;
+                }
+
+                // Add to connection queue instead of immediate start
+                if (!_connectionQueue.Any(q => q.League.Value == config.League.Value &&
+                                              q.SearchId.Value == config.SearchId.Value))
+                {
+                    _connectionQueue.Enqueue(config);
+                    LogMessage($"📋 QUEUED: Search {config.SearchId.Value} added to connection queue (Position: {_connectionQueue.Count})");
+                }
+            }
+            else
+            {
+                // 🔹 LOG ONLY IF STATE CHANGED
+                if (existingListener.IsRunning != existingListener.LastIsRunning ||
+                    existingListener.IsConnecting != existingListener.LastIsConnecting)
+                {
+                    LogMessage($"📍 EXISTING LISTENER: {config.SearchId.Value} (Running: {existingListener.IsRunning}, Connecting: {existingListener.IsConnecting})");
+
+                    // Update last known state
+                    existingListener.LastIsRunning = existingListener.IsRunning;
+                    existingListener.LastIsConnecting = existingListener.IsConnecting;
+                }
+            }
+        }
+    }
+    // Render method moved to JewYourItem.Gui.cs
+
+    private void StopAll()
+    {
+        foreach (var listener in _listeners)
+        {
+            listener.Stop();
+        }
+        _listeners.Clear();
+    }
+
+    private void ForceStopAll()
+    {
+        LogMessage("🚨 FORCE STOPPING: All listeners due to plugin disable...");
+        foreach (var listener in _listeners.ToList())
+        {
+            listener.Stop();
+            _listeners.Remove(listener);
+        }
+        _recentItems.Clear();
+        LogMessage("✅ All listeners force stopped - plugin fully disabled.");
+    }
+
+    private void StopDisabledListeners()
+    {
+        var listenersToRemove = new List<SearchListener>();
+
+        foreach (var listener in _listeners.ToList())
+        {
+            // Check if the search itself is disabled OR its parent group is disabled
+            bool searchStillActive = false;
+            bool foundMatchingConfig = false;
+            string disableReason = "";
+
+            foreach (var group in Settings.Groups)
+            {
+                foreach (var search in group.Searches)
+                {
+                    if (search.League.Value == listener.Config.League.Value &&
+                        search.SearchId.Value == listener.Config.SearchId.Value)
+                    {
+                        foundMatchingConfig = true;
+
+                        // CRITICAL: Group disable overrides everything
+                        if (!group.Enable.Value)
+                        {
+                            disableReason = $"group '{group.Name.Value}' disabled";
+                            searchStillActive = false;
+                        }
+                        else if (!search.Enable.Value)
+                        {
+                            disableReason = "search disabled";
+                            searchStillActive = false;
+                        }
+                        else
+                        {
+                            searchStillActive = true;
+                        }
+                        break;
+                    }
+                }
+                if (foundMatchingConfig) break;
+            }
+
             // If we didn't find the config at all, or it's disabled, stop the listener
             if (!foundMatchingConfig || !searchStillActive)
             {
@@ -746,7 +925,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 listenersToRemove.Add(listener);
             }
         }
-        
+
         // Remove stopped listeners
         if (listenersToRemove.Count > 0)
         {

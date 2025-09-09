@@ -24,37 +24,42 @@ public partial class JewYourItem
         public CancellationTokenSource Cts { get; set; }
         public bool IsRunning { get; set; }
         public bool IsConnecting { get; set; } = false;
+        public bool IsAuthenticationError { get; set; } = false;
         public DateTime LastConnectionAttempt { get; set; } = DateTime.MinValue;
         public DateTime LastErrorTime { get; set; } = DateTime.MinValue;
         public int ConnectionAttempts { get; set; } = 0;
-        public bool IsAuthenticationError { get; set; } = false;
-        public string LastErrorMessage { get; set; } = "";
         private readonly object _connectionLock = new object();
         private StringBuilder _messageBuffer = new StringBuilder();
-        private Action<string> _logMessage;
-        private Action<string> _logError;
-        private readonly Action<string> _logDebug;
-        private readonly Action<string> _logInfo;
-        private readonly Action<string> _logWarning;
+        private readonly Action<string> _logMessage;
+        private readonly Action<string> _logError;
 
-        public SearchListener(JewYourItem parent, JewYourItemInstanceSettings config, Action<string> logMessage, Action<string> logError, Action<string> logDebug, Action<string> logInfo, Action<string> logWarning)
+        // ✅ DODAJ TUTAJ
+        public bool LastIsRunning { get; set; } = false;
+        public bool LastIsConnecting { get; set; } = false;
+
+        // Exponential backoff fields
+        private int _currentRetryDelay = 1000; // Start with 1 second
+        private const int MaxRetryDelay = 30000; // Max 30 seconds
+        private const int BackoffMultiplier = 2;
+
+        public SearchListener(JewYourItem parent, JewYourItemInstanceSettings config, Action<string> logMessage, Action<string> logError)
         {
             _parent = parent;
             Config = config;
             Cts = new CancellationTokenSource();
             _logMessage = logMessage;
             _logError = logError;
-            _logDebug = logDebug;
-            _logInfo = logInfo;
-            _logWarning = logWarning;
         }
 
         public async void Start(Action<string> logMessage, Action<string> logError, string sessionId)
         {
-            // Update logging delegates in case they changed
-            _logMessage = logMessage;
-            _logError = logError;
-            // Note: LogDebug, LogInfo, LogWarning are set in constructor and shouldn't change
+            // Add delay before connection attempt
+            if (_currentRetryDelay > 0)
+            {
+                logMessage($"⏳ Delaying connection attempt for {_currentRetryDelay}ms");
+                await Task.Delay(_currentRetryDelay);
+            }
+
             lock (_connectionLock)
             {
                 // STRICT CONNECTION SAFETY CHECKS
@@ -79,62 +84,52 @@ public partial class JewYourItem
                     return;
                 }
 
-                // Rate limit cooldown check - use shorter cooldown for auth errors
-                double cooldownSeconds = IsAuthenticationError ? 10 : JewYourItem.RestartCooldownSeconds; // 10 seconds for auth errors, 300 for others
-                if ((DateTime.Now - LastErrorTime).TotalSeconds < cooldownSeconds)
+                // Rate limit cooldown check
+                if ((DateTime.Now - LastErrorTime).TotalSeconds < JewYourItem.RestartCooldownSeconds)
                 {
-                    if (IsAuthenticationError)
-                    {
-                        _logDebug($"🔐 AUTH ERROR COOLDOWN: Search {Config.SearchId.Value} waiting for session ID fix ({cooldownSeconds - (DateTime.Now - LastErrorTime).TotalSeconds:F1}s remaining)");
-                    }
-                    else
-                    {
-                        _logDebug($"🛡️ CONNECTION BLOCKED: Search {Config.SearchId.Value} in rate limit cooldown ({cooldownSeconds - (DateTime.Now - LastErrorTime).TotalSeconds:F1}s remaining)");
-                    }
+                    _logMessage($"🛡️ CONNECTION BLOCKED: Search {Config.SearchId.Value} in rate limit cooldown ({JewYourItem.RestartCooldownSeconds - (DateTime.Now - LastErrorTime).TotalSeconds:F1}s remaining)");
                     return;
                 }
 
                 // EMERGENCY: Connection attempt throttling (max 1 attempt per 30 seconds)
                 if ((DateTime.Now - LastConnectionAttempt).TotalSeconds < 30)
                 {
-                    _logDebug($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} connection throttled ({30 - (DateTime.Now - LastConnectionAttempt).TotalSeconds:F1}s remaining)");
+                    _logMessage($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} connection throttled ({30 - (DateTime.Now - LastConnectionAttempt).TotalSeconds:F1}s remaining)");
                     return;
                 }
 
-                // EMERGENCY: Max connection attempts per hour (extremely limited)
-                if (ConnectionAttempts >= 3 && (DateTime.Now - LastConnectionAttempt).TotalHours < 1)
-                {
-                    _logDebug($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} exceeded max connection attempts (3 per HOUR)");
-                    return;
-                }
-
-                // EMERGENCY: Global session connection limit
+                // BLOCK: Max 10 attempts, then 15 minutes cooldown
                 if (ConnectionAttempts >= 10)
                 {
-                    _logDebug($"🚨 EMERGENCY BLOCK: Search {Config.SearchId.Value} exceeded TOTAL session limit (10 attempts EVER)");
-                    return;
+                    if ((DateTime.Now - LastConnectionAttempt).TotalMinutes < 15)
+                    {
+                        _logMessage($"🚨 TEMP BLOCK: Search {Config.SearchId.Value} reached 10 attempts, waiting 15 minutes before retry");
+                        return;
+                    }
+                    else
+                    {
+                        // Reset after 15 minutes
+                        ConnectionAttempts = 0;
+                        _logMessage($"♻️ TEMP BLOCK RESET: Search {Config.SearchId.Value} attempts counter reset, resuming search");
+                    }
                 }
 
-                // Reset connection attempts counter if more than 1 HOUR has passed
-                if ((DateTime.Now - LastConnectionAttempt).TotalHours >= 1)
+                // Reset connection attempts partially if more than 10 minutes passed since last attempt
+                if ((DateTime.Now - LastConnectionAttempt).TotalMinutes >= 10)
                 {
-                    ConnectionAttempts = Math.Min(ConnectionAttempts, 5); // Partial reset, keep some penalty
+                    ConnectionAttempts = Math.Min(ConnectionAttempts, 5); // Partial reset
                 }
-
-                // REMOVED: Emergency shutdown logic - no longer needed since system is stable
-                // The 20-search limit in the main Tick method provides sufficient protection
 
                 // Set connection state flags
                 IsConnecting = true;
                 LastConnectionAttempt = DateTime.Now;
                 ConnectionAttempts++;
-                
-                _logDebug($"🔌 STARTING CONNECTION: Search {Config.SearchId.Value} (Attempt #{ConnectionAttempts}, Global: {JewYourItem._globalConnectionAttempts})");
+
+                _logMessage($"🔌 STARTING CONNECTION: Search {Config.SearchId.Value} (Attempt #{ConnectionAttempts})");
             }
+
             try
             {
-                // REMOVED: Rate limiting for WebSocket connections to make startup instant
-                
                 // Dispose any existing WebSocket
                 if (WebSocket != null)
                 {
@@ -156,57 +151,42 @@ public partial class JewYourItem
                 WebSocket.Options.SetRequestHeader("Pragma", "no-cache");
                 WebSocket.Options.SetRequestHeader("Cache-Control", "no-cache");
                 WebSocket.Options.SetRequestHeader("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits");
-                
+
                 string url = $"wss://www.pathofexile.com/api/trade2/live/poe2/{Uri.EscapeDataString(Config.League.Value)}/{Config.SearchId.Value}";
-                
+
                 _logMessage($"🔌 CONNECTING: {Config.SearchId.Value} to {url}");
                 await WebSocket.ConnectAsync(new Uri(url), Cts.Token);
 
                 // Only increment global counter AFTER successful connection
                 JewYourItem._globalConnectionAttempts++;
 
+                // Reset retry delay after successful connection
+                _currentRetryDelay = 1000;
+
                 lock (_connectionLock)
                 {
                     IsConnecting = false;
                     IsRunning = true;
                 }
-                
-                // Clear any previous authentication errors on successful connection
-                IsAuthenticationError = false;
-                LastErrorMessage = "";
-                
+
                 _logMessage($"✅ CONNECTED: WebSocket for search {Config.SearchId.Value}");
                 _parent._activeListener = this;
                 _ = ReceiveMessagesAsync(_logMessage, _logError, sessionId);
             }
             catch (Exception ex)
             {
+                // Increase delay for next attempt (exponential backoff)
+                _currentRetryDelay = Math.Min(_currentRetryDelay * BackoffMultiplier, MaxRetryDelay);
+
                 lock (_connectionLock)
                 {
                     IsConnecting = false;
                     IsRunning = false;
                 }
-                
-                // Check for authentication errors (401)
-                bool isAuthError = ex.Message.Contains("401");
-                IsAuthenticationError = isAuthError;
-                LastErrorMessage = ex.Message;
-                
-                // Debug logging to help troubleshoot
-                _logDebug($"🔍 ERROR ANALYSIS: Message='{ex.Message}', IsAuthError={isAuthError}");
-                
-                if (isAuthError)
-                {
-                    _logError($"🔐 AUTHENTICATION FAILED: Search {Config.SearchId.Value} - Invalid session ID! Please update your POESESSID in settings.");
-                    _logError($"💡 TIP: Get your session ID from browser cookies on pathofexile.com");
-                }
-                else
-                {
-                    _logError($"❌ CONNECTION FAILED: Search {Config.SearchId.Value}: {ex.Message}");
-                }
-                
+
+                _logError($"❌ CONNECTION FAILED: Search {Config.SearchId.Value}: {ex.Message} - Retry in {_currentRetryDelay}ms");
                 LastErrorTime = DateTime.Now;
-                
+
                 // Clean up WebSocket on failure
                 if (WebSocket != null)
                 {
@@ -272,7 +252,7 @@ public partial class JewYourItem
                     break;
                 }
             }
-            
+
             lock (_connectionLock)
             {
                 IsRunning = false;
@@ -287,7 +267,7 @@ public partial class JewYourItem
 
             message = message.Trim('\uFEFF', '\u200B', '\u200C', '\u200D', '\u2060');
             message = message.Trim();
-            
+
             int jsonStart = message.IndexOf('{');
             if (jsonStart > 0)
             {
@@ -299,7 +279,7 @@ public partial class JewYourItem
                 LastErrorTime = DateTime.Now;
                 return message;
             }
-            
+
             if (message.Length > 0 && (char.IsControl(message[0]) || message[0] > 127))
             {
                 var cleanBytes = new List<byte>();
@@ -316,7 +296,7 @@ public partial class JewYourItem
                 }
                 message = Encoding.UTF8.GetString(cleanBytes.ToArray());
             }
-            
+
             return message;
         }
 
@@ -327,7 +307,7 @@ public partial class JewYourItem
 
             int braceCount = 0;
             int startIndex = -1;
-            
+
             for (int i = 0; i < message.Length; i++)
             {
                 if (message[i] == '{')
@@ -346,7 +326,7 @@ public partial class JewYourItem
                     }
                 }
             }
-            
+
             return null;
         }
 
@@ -355,7 +335,7 @@ public partial class JewYourItem
             try
             {
                 string cleanMessage = CleanMessage(message, logMessage, logError);
-                
+
                 try
                 {
                     var wsResponse = JsonConvert.DeserializeObject<WsResponse>(cleanMessage);
@@ -370,7 +350,7 @@ public partial class JewYourItem
                         // Split items into batches of 10 (API limit)
                         const int maxItemsPerBatch = 10;
                         var itemBatches = new List<string[]>();
-                        
+
                         for (int i = 0; i < wsResponse.New.Length; i += maxItemsPerBatch)
                         {
                             var batch = wsResponse.New.Skip(i).Take(maxItemsPerBatch).ToArray();
@@ -385,7 +365,7 @@ public partial class JewYourItem
                             // REMOVED: Rate limiting for batch requests to make auto TP instant
                             string ids = string.Join(",", batch);
                             string fetchUrl = $"https://www.pathofexile.com/api/trade2/fetch/{ids}?query={Config.SearchId.Value}&realm=poe2";
-                            
+
                             logMessage($"🔍 FETCHING batch of {batch.Length} items: {ids}");
 
                             using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
@@ -427,20 +407,8 @@ public partial class JewYourItem
                                     if (response.IsSuccessStatusCode)
                                     {
                                         string content = await response.Content.ReadAsStringAsync();
-                                        ItemFetchResponse itemResponse = null;
-                                        
-                                        try
-                                        {
-                                            itemResponse = JsonConvert.DeserializeObject<ItemFetchResponse>(content);
-                                        }
-                                        catch (JsonException ex)
-                                        {
-                                            logError($"JSON parsing failed: {ex.Message}");
-                                            logError($"Response content: {content}");
-                                            continue; // Skip this batch and try the next one
-                                        }
-                                        
-                                        if (itemResponse?.Result != null && itemResponse.Result.Any())
+                                        var itemResponse = JsonConvert.DeserializeObject<ItemFetchResponse>(content);
+                                        if (itemResponse.Result != null && itemResponse.Result.Any())
                                         {
                                             logMessage($"✅ BATCH SUCCESS: Received {itemResponse.Result.Length} items from batch");
                                             foreach (var item in itemResponse.Result)
@@ -454,10 +422,10 @@ public partial class JewYourItem
                                                 int x = item.Listing.Stash?.X ?? 0;
                                                 int y = item.Listing.Stash?.Y ?? 0;
                                                 logMessage($"{name} - {price} at ({x}, {y})");
-                                                
+
                                                 // Parse token expiration times
                                                 var (issuedAt, expiresAt) = RecentItem.ParseTokenTimes(item.Listing.HideoutToken);
-                                                
+
                                                 var recentItem = new RecentItem
                                                 {
                                                     Name = name,
@@ -470,13 +438,10 @@ public partial class JewYourItem
                                                     TokenIssuedAt = issuedAt,
                                                     TokenExpiresAt = expiresAt
                                                 };
-                                                
-                                                lock (_parent._recentItemsLock)
-                                                {
-                                                    _parent._recentItems.Enqueue(recentItem);
-                                                    while (_parent._recentItems.Count > _parent.Settings.MaxRecentItems.Value)
-                                                        _parent._recentItems.Dequeue();
-                                                }
+
+                                                _parent._recentItems.Enqueue(recentItem);
+                                                while (_parent._recentItems.Count > _parent.Settings.MaxRecentItems.Value)
+                                                    _parent._recentItems.Dequeue();
                                                 if (_parent._playSound)
                                                 {
                                                     logMessage("Attempting to play sound...");
@@ -484,19 +449,19 @@ public partial class JewYourItem
                                                     {
                                                         var assemblyLocation = System.Reflection.Assembly.GetExecutingAssembly().Location;
                                                         var assemblyDir = Path.GetDirectoryName(assemblyLocation);
-                                                        
+
                                                         int randomNumber = _random.Next(1, 10001); // 1 in 10,000 chance
                                                         bool playRareSound = randomNumber == 1;
                                                         string soundFileName = playRareSound ? "pulserare.wav" : "pulse.wav";
-                                                        
+
                                                         // Debug logging for rare sound testing
                                                         logMessage($"🎲 SOUND DEBUG: Random={randomNumber}, PlayRare={playRareSound}, File={soundFileName}");
-                                                        
+
                                                         if (playRareSound)
                                                         {
                                                             logMessage("🎉 WHAT ARE YOU DOING STEP BRO! 🎉 (1 in 10,000 chance)");
                                                         }
-                                                        
+
                                                         var possiblePaths = new[]
                                                         {
                                                             Path.Combine(assemblyDir, "sound", soundFileName),
@@ -544,29 +509,25 @@ public partial class JewYourItem
                                                 }
                                                 if (_parent.Settings.AutoTp.Value && _parent.GameController.Area.CurrentArea.IsHideout)
                                                 {
-                                                    // Check if game is loading before attempting auto TP
-                                                    if (_parent.GameController.IsLoading)
+                                                    // Check if TP is locked and if timeout has expired
+                                                    if (_parent._tpLocked && (DateTime.Now - _parent._tpLockedTime).TotalSeconds >= 10)
                                                     {
-                                                        logMessage("⏳ Auto TP skipped: Game is loading");
+                                                        logMessage("🔓 TP UNLOCKED: 10-second timeout reached in SearchListener, unlocking TP");
+                                                        _parent._tpLocked = false;
+                                                        _parent._tpLockedTime = DateTime.MinValue;
                                                     }
-                                                    else if (!_parent.GameController.InGame)
-                                                    {
-                                                        logMessage("🚫 Auto TP skipped: Not in valid game state");
-                                                    }
-                    // Check for 2-second delay after area change
-                    else if ((DateTime.Now - _parent._lastTeleportTime).TotalSeconds < 2.0)
-                    {
-                        logMessage("⏳ Auto TP skipped: 2 second delay after area change to allow item purchase");
-                    }
-                                                    else
+
+                                                    if (!_parent._tpLocked)
                                                     {
                                                         _parent.TravelToHideout();
-                                                        lock (_parent._recentItemsLock)
-                                                        {
-                                                            _parent._recentItems.Clear();
-                                                        }
+                                                        _parent._recentItems.Clear();
                                                         _parent._lastTpTime = DateTime.Now;
                                                         logMessage("Auto TP executed due to new search result.");
+                                                    }
+                                                    else
+                                                    {
+                                                        double remainingTime = 10 - (DateTime.Now - _parent._tpLockedTime).TotalSeconds;
+                                                        logMessage($"Auto TP skipped: TP locked, waiting for window or timeout ({Math.Max(0, remainingTime):F1}s remaining)");
                                                     }
                                                 }
                                                 // REMOVED: Mouse movement should only happen after manual teleports, not when auto TP is blocked by cooldown
@@ -589,12 +550,9 @@ public partial class JewYourItem
                                         else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest && errorMessage.Contains("Invalid query"))
                                         {
                                             logMessage($"⚠️ BATCH WARNING: Invalid query for batch: {errorMessage}");
-                                            lock (_parent._recentItemsLock)
+                                            if (_parent._recentItems.Count > 0)
                                             {
-                                                if (_parent._recentItems.Count > 0)
-                                                {
-                                                    _parent._recentItems.Dequeue();
-                                                }
+                                                _parent._recentItems.Dequeue();
                                             }
                                         }
                                         else
@@ -631,14 +589,10 @@ public partial class JewYourItem
             lock (_connectionLock)
             {
                 _logMessage($"🛑 STOPPING: Search {Config.SearchId.Value} (Running: {IsRunning}, Connecting: {IsConnecting})");
-                
+
                 IsRunning = false;
                 IsConnecting = false;
-                
-                // Clear logging delegates to prevent any delayed callbacks
-                _logMessage = (msg) => { }; // No-op logger
-                _logError = (msg) => { }; // No-op logger
-                
+
                 if (Cts != null && !Cts.IsCancellationRequested)
                 {
                     try
@@ -647,14 +601,14 @@ public partial class JewYourItem
                     }
                     catch { /* Ignore cancellation errors */ }
                 }
-                
+
                 if (WebSocket != null)
                 {
                     try
                     {
                         var webSocketToClose = WebSocket;
                         WebSocket = null; // Set to null immediately to prevent race conditions
-                        
+
                         if (webSocketToClose.State == WebSocketState.Open)
                         {
                             // Use Task.Run to avoid blocking the main thread
@@ -662,9 +616,7 @@ public partial class JewYourItem
                             {
                                 try
                                 {
-                                    // Use a timeout for closing the WebSocket
-                                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                                    await webSocketToClose.CloseAsync(WebSocketCloseStatus.NormalClosure, "Plugin stopped", cts.Token);
+                                    await webSocketToClose.CloseAsync(WebSocketCloseStatus.NormalClosure, "Plugin stopped", CancellationToken.None);
                                 }
                                 catch (Exception ex)
                                 {
@@ -681,19 +633,6 @@ public partial class JewYourItem
                                         _logError($"Error disposing WebSocket for {Config.SearchId.Value}: {ex.Message}");
                                     }
                                 }
-                            });
-                            
-                            // Fallback: Force dispose after 3 seconds if still not closed
-                            Task.Delay(3000).ContinueWith(_ =>
-                            {
-                                try
-                                {
-                                    if (webSocketToClose.State != WebSocketState.Closed)
-                                    {
-                                        webSocketToClose.Dispose();
-                                    }
-                                }
-                                catch { /* Ignore disposal errors in fallback */ }
                             });
                         }
                         else
@@ -714,7 +653,7 @@ public partial class JewYourItem
                         WebSocket = null; // Ensure it's null even if cleanup fails
                     }
                 }
-                
+
                 _logMessage($"✅ STOPPED: Search {Config.SearchId.Value}");
             }
         }
@@ -747,24 +686,24 @@ public partial class JewYourItem
                 float cellWidth = rect.Width / 12.0f;
                 float cellHeight = rect.Height / 12.0f;
                 var topLeft = rect.TopLeft;
-                
+
                 // Calculate item position within the stash panel (bottom-right to avoid sockets)
                 int itemX = (int)(topLeft.X + (x * cellWidth) + (cellWidth * 7 / 8));
                 int itemY = (int)(topLeft.Y + (y * cellHeight) + (cellHeight * 7 / 8));
-                
+
                 // Get game window position
                 var windowRect = _parent.GameController.Window.GetWindowRectangle();
                 System.Drawing.Point windowPos = new System.Drawing.Point((int)windowRect.X, (int)windowRect.Y);
-                
+
                 // Calculate final screen position
                 int finalX = windowPos.X + itemX;
                 int finalY = windowPos.Y + itemY;
-                
+
                 // Move mouse cursor
                 System.Windows.Forms.Cursor.Position = new System.Drawing.Point(finalX, finalY);
-                
+
                 logMessage($"Moved mouse to item location: Stash({x},{y}) -> Screen({finalX},{finalY}) - Panel size: {rect.Width}x{rect.Height}");
-                
+
                 // Auto Buy: Perform Ctrl+Left Click if enabled
                 if (_parent.Settings.AutoBuy.Value)
                 {

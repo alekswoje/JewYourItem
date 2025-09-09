@@ -52,6 +52,14 @@ public class JewYourItemSettings : ISettings
     public RangeNode<int> MaxRecentItems { get; set; } = new RangeNode<int>(5, 1, 20);
     public Vector2 WindowPosition { get; set; } = new Vector2(10, 800);
     
+    // Purchase window learning settings
+    [IgnoreMenu]
+    public ToggleNode HasLearnedPurchaseWindow { get; set; } = new ToggleNode(false);
+    [IgnoreMenu]
+    public RangeNode<int> PurchaseWindowX { get; set; } = new RangeNode<int>(0, 0, 2000);
+    [IgnoreMenu]
+    public RangeNode<int> PurchaseWindowY { get; set; } = new RangeNode<int>(0, 0, 2000);
+    
     public List<SearchGroup> Groups { get; set; } = new List<SearchGroup>();
     [JsonIgnore]
     public GroupsRenderer GroupsConfig { get; set; }
