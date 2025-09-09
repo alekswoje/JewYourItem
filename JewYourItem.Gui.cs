@@ -6,6 +6,7 @@ using System.Numerics;
 using System.Windows.Forms;
 using ExileCore2.Shared.Nodes;
 using ImGuiNET;
+using JewYourItem.Utility;
 
 namespace JewYourItem;
 
@@ -277,9 +278,28 @@ public partial class JewYourItem
         ImGui.InputText("##SessionId", ref _sessionIdBuffer, 100, ImGuiInputTextFlags.Password);
         if (ImGui.IsItemEdited() && !_settingsUpdated)
         {
+            // Store in both secure and regular storage for compatibility
+            Settings.SecureSessionId = _sessionIdBuffer;
             Settings.SessionId.Value = _sessionIdBuffer;
             _settingsUpdated = true;
-            LogMessage($"Session ID updated to: {Settings.SessionId.Value}");
+            LogMessage("✅ Session ID updated securely (not logged for security)");
+        }
+        
+        // Show current storage status
+        bool hasSecureSessionId = !string.IsNullOrEmpty(Settings.SecureSessionId);
+        bool hasRegularSessionId = !string.IsNullOrEmpty(Settings.SessionId.Value);
+        
+        if (hasSecureSessionId)
+        {
+            ImGui.Text("🔐 Secure storage: Active");
+        }
+        else if (hasRegularSessionId)
+        {
+            ImGui.Text("⚠️ Regular storage: Consider migrating to secure storage");
+        }
+        else
+        {
+            ImGui.Text("❌ No session ID stored");
         }
         if (!ImGui.IsItemActive())
         {
@@ -418,6 +438,64 @@ public partial class JewYourItem
             ImGui.SetTooltip("Maximum number of recent items to keep in the list (1-20)");
         }
 
+        ImGui.Separator();
+        
+        // SECURE SESSION ID MANAGEMENT
+        ImGui.Text("🔐 Secure Session ID Management:");
+        if (ImGui.Button("Migrate to Secure Storage"))
+        {
+            if (!string.IsNullOrEmpty(Settings.SessionId.Value))
+            {
+                Settings.SecureSessionId = Settings.SessionId.Value;
+                LogMessage("✅ Session ID migrated to secure storage");
+            }
+            else
+            {
+                LogMessage("❌ No regular session ID to migrate");
+            }
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Migrate your regular session ID to secure Windows Credential Manager storage");
+        }
+        
+        ImGui.SameLine();
+        if (ImGui.Button("Clear All Session IDs"))
+        {
+            EncryptedSettings.ClearSecureSessionId();
+            Settings.SessionId.Value = "";
+            _sessionIdBuffer = "";
+            LogMessage("🗑️ All stored session IDs cleared securely");
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Clear both secure and regular session ID storage");
+        }
+        
+        ImGui.SameLine();
+        if (ImGui.Button("Test Session ID"))
+        {
+            string secureSessionId = Settings.SecureSessionId;
+            string regularSessionId = Settings.SessionId.Value;
+            
+            if (!string.IsNullOrEmpty(secureSessionId))
+            {
+                LogMessage("✅ Secure session ID is accessible");
+            }
+            else if (!string.IsNullOrEmpty(regularSessionId))
+            {
+                LogMessage("⚠️ Only regular session ID found (consider migrating to secure storage)");
+            }
+            else
+            {
+                LogMessage("❌ No session ID found in any storage");
+            }
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Test which session ID storage methods are working");
+        }
+        
         ImGui.Separator();
         
         // EMERGENCY CONTROLS

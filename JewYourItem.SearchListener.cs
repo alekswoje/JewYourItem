@@ -62,10 +62,14 @@ public partial class JewYourItem
 
             lock (_connectionLock)
             {
+                // DEBUG: Log session ID details
+                logMessage($"🔍 DEBUG: SearchListener received session ID length: {sessionId?.Length ?? 0}");
+                logMessage($"🔍 DEBUG: League: '{Config.League.Value}', SearchId: '{Config.SearchId.Value}'");
+                
                 // STRICT CONNECTION SAFETY CHECKS
                 if (string.IsNullOrEmpty(Config.League.Value) || string.IsNullOrEmpty(Config.SearchId.Value) || string.IsNullOrEmpty(sessionId))
                 {
-                    _logError("League, Search ID, or Session ID is empty for this search.");
+                    _logError($"❌ VALIDATION FAILED: League='{Config.League.Value}', SearchId='{Config.SearchId.Value}', SessionId length={sessionId?.Length ?? 0}");
                     LastErrorTime = DateTime.Now;
                     return;
                 }
@@ -143,6 +147,8 @@ public partial class JewYourItem
 
                 WebSocket = new ClientWebSocket();
                 var cookie = $"POESESSID={sessionId}";
+                logMessage($"🔍 DEBUG: Setting WebSocket cookie: POESESSID={sessionId?.Substring(0, Math.Min(8, sessionId?.Length ?? 0))}...");
+                logMessage($"🔍 DEBUG: Full cookie string: {cookie}");
                 WebSocket.Options.SetRequestHeader("Cookie", cookie);
                 WebSocket.Options.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
                 WebSocket.Options.SetRequestHeader("Origin", "https://www.pathofexile.com");
@@ -151,10 +157,28 @@ public partial class JewYourItem
                 WebSocket.Options.SetRequestHeader("Pragma", "no-cache");
                 WebSocket.Options.SetRequestHeader("Cache-Control", "no-cache");
                 WebSocket.Options.SetRequestHeader("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits");
+                
+                // Add additional authentication headers that might be required
+                WebSocket.Options.SetRequestHeader("Accept", "*/*");
+                WebSocket.Options.SetRequestHeader("Sec-Ch-Ua", "\"Not;A=Brand\";v=\"99\", \"Google Chrome\";v=\"139\", \"Chromium\";v=\"139\"");
+                WebSocket.Options.SetRequestHeader("Sec-Ch-Ua-Arch", "x86");
+                WebSocket.Options.SetRequestHeader("Sec-Ch-Ua-Bitness", "64");
+                WebSocket.Options.SetRequestHeader("Sec-Ch-Ua-Full-Version", "139.0.7258.157");
+                WebSocket.Options.SetRequestHeader("Sec-Ch-Ua-Full-Version-List", "\"Not;A=Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"139.0.7258.157\", \"Chromium\";v=\"139.0.7258.157\"");
+                WebSocket.Options.SetRequestHeader("Sec-Ch-Ua-Mobile", "?0");
+                WebSocket.Options.SetRequestHeader("Sec-Ch-Ua-Model", "");
+                WebSocket.Options.SetRequestHeader("Sec-Ch-Ua-Platform", "Windows");
+                WebSocket.Options.SetRequestHeader("Sec-Ch-Ua-Platform-Version", "19.0.0");
+                WebSocket.Options.SetRequestHeader("Sec-Fetch-Dest", "websocket");
+                WebSocket.Options.SetRequestHeader("Sec-Fetch-Mode", "websocket");
+                WebSocket.Options.SetRequestHeader("Sec-Fetch-Site", "same-origin");
+                WebSocket.Options.SetRequestHeader("Priority", "u=1, i");
+                WebSocket.Options.SetRequestHeader("Referer", $"https://www.pathofexile.com/trade2/search/poe2/{Uri.EscapeDataString(Config.League.Value)}/{Config.SearchId.Value}/live");
 
                 string url = $"wss://www.pathofexile.com/api/trade2/live/poe2/{Uri.EscapeDataString(Config.League.Value)}/{Config.SearchId.Value}";
 
                 _logMessage($"🔌 CONNECTING: {Config.SearchId.Value} to {url}");
+                logMessage($"🔍 DEBUG: WebSocket headers set - attempting connection...");
                 await WebSocket.ConnectAsync(new Uri(url), Cts.Token);
 
                 // Only increment global counter AFTER successful connection
@@ -185,6 +209,8 @@ public partial class JewYourItem
                 }
 
                 _logError($"❌ CONNECTION FAILED: Search {Config.SearchId.Value}: {ex.Message} - Retry in {_currentRetryDelay}ms");
+                _logError($"🔍 DEBUG: Exception type: {ex.GetType().Name}");
+                _logError($"🔍 DEBUG: Exception details: {ex}");
                 LastErrorTime = DateTime.Now;
 
                 // Clean up WebSocket on failure
@@ -371,6 +397,7 @@ public partial class JewYourItem
                             using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
                             {
                                 var cookie = $"POESESSID={sessionId}";
+                                logMessage($"🔍 DEBUG: Setting HTTP cookie: POESESSID={sessionId?.Substring(0, Math.Min(8, sessionId?.Length ?? 0))}...");
                                 request.Headers.Add("Cookie", cookie);
                                 request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
                                 request.Headers.Add("Accept", "*/*");

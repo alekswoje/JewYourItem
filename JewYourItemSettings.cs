@@ -7,6 +7,7 @@ using ImGuiNET;
 using Newtonsoft.Json;
 using System.Numerics;
 using System.Windows.Forms;
+using JewYourItem.Utility;
 
 namespace JewYourItem;
 
@@ -24,6 +25,14 @@ public class JewYourItemSettings : ISettings
     public ToggleNode DebugMode { get; set; } = new ToggleNode(false);
     [IgnoreMenu]
     public TextNode SessionId { get; set; } = new TextNode("");
+    
+    // Secure session ID storage - not serialized to JSON
+    [JsonIgnore]
+    public string SecureSessionId 
+    { 
+        get => EncryptedSettings.GetSecureSessionId();
+        set => EncryptedSettings.StoreSecureSessionId(value);
+    }
     [Menu("Travel Hotkey", "Key to initiate travel action")]
     [IgnoreMenu]
     public HotkeyNode TravelHotkey { get; set; } = new HotkeyNode(Keys.F5);

@@ -115,10 +115,55 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     public override bool Initialise()
     {
         _rateLimiter = new ConservativeRateLimiter(LogMessage, LogError);
-        _sessionIdBuffer = Settings.SessionId.Value ?? "";
+        
+        // Use secure session ID storage with fallback to regular session ID
+        LogMessage("🔍 DEBUG: Checking secure session ID storage...");
+        _sessionIdBuffer = Settings.SecureSessionId ?? "";
+        LogMessage($"🔍 DEBUG: Secure session ID length: {_sessionIdBuffer?.Length ?? 0}");
+        
+        // Fallback to regular session ID if secure storage is empty
         if (string.IsNullOrEmpty(_sessionIdBuffer))
         {
-            LogMessage("Warning: Session ID is empty. Please set it in the settings.");
+            LogMessage("🔍 DEBUG: Secure storage empty, checking regular session ID...");
+            _sessionIdBuffer = Settings.SessionId.Value ?? "";
+            LogMessage($"🔍 DEBUG: Regular session ID length: {_sessionIdBuffer?.Length ?? 0}");
+            
+            if (!string.IsNullOrEmpty(_sessionIdBuffer))
+            {
+                LogMessage("⚠️ Using regular session ID (secure storage empty) - consider updating to secure storage");
+                // Automatically migrate to secure storage
+                Settings.SecureSessionId = _sessionIdBuffer;
+                LogMessage("✅ Session ID migrated to secure storage");
+            }
+        }
+        else
+        {
+            LogMessage("✅ Using secure session ID storage");
+        }
+        
+        if (string.IsNullOrEmpty(_sessionIdBuffer))
+        {
+            LogMessage("❌ ERROR: Session ID is empty. Please set it in the settings.");
+            LogMessage("💡 TIP: Go to plugin settings and enter your POESESSID from pathofexile.com cookies");
+        }
+        else
+        {
+            LogMessage($"✅ Session ID loaded successfully (length: {_sessionIdBuffer.Length})");
+            LogMessage($"🔍 DEBUG: Session ID starts with: {_sessionIdBuffer.Substring(0, Math.Min(8, _sessionIdBuffer.Length))}...");
+            
+            // Validate session ID format (should be 32 characters, alphanumeric)
+            if (_sessionIdBuffer.Length != 32)
+            {
+                LogMessage($"⚠️ WARNING: Session ID length is {_sessionIdBuffer.Length}, expected 32 characters");
+            }
+            
+            if (!_sessionIdBuffer.All(c => char.IsLetterOrDigit(c)))
+            {
+                LogMessage("⚠️ WARNING: Session ID contains non-alphanumeric characters");
+            }
+            
+            // Test session ID validity with a simple API call
+            _ = TestSessionIdValidity(_sessionIdBuffer);
         }
 
         LogMessage("                                                                                                    ");
@@ -251,6 +296,99 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         LogMessage($"[WARNING] {message}");
     }
 
+        // Test session ID validity
+        private async Task TestSessionIdValidity(string sessionId)
+        {
+            try
+            {
+                LogMessage("🔍 TESTING: Validating session ID with Path of Exile API...");
+                
+                using (var request = new HttpRequestMessage(HttpMethod.Get, "https://www.pathofexile.com/api/profile"))
+                {
+                    request.Headers.Add("Cookie", $"POESESSID={sessionId}");
+                    request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+                    
+                    using (var response = await _httpClient.SendAsync(request))
+                    {
+                        if (response.IsSuccessStatusCode)
+                        {
+                            LogMessage("✅ SESSION ID VALID: Successfully authenticated with Path of Exile API");
+                        }
+                        else if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                        {
+                            LogMessage("❌ SESSION ID INVALID: 401 Unauthorized - Session ID is expired or invalid");
+                            LogMessage("💡 SOLUTION: Get a fresh POESESSID from pathofexile.com cookies");
+                        }
+                        else
+                        {
+                            LogMessage($"⚠️ SESSION ID TEST: Unexpected response {response.StatusCode} - Session ID may be invalid");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"⚠️ SESSION ID TEST FAILED: {ex.Message}");
+            }
+        }
+
+        // Clean up old session ID from settings file
+        private void CleanupOldSessionIdFromSettings()
+        {
+            try
+            {
+                string settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ExileCore2", "config", "global", "JewYourItem_settings.json");
+                
+                if (File.Exists(settingsPath))
+                {
+                    LogMessage("🧹 CLEANUP: Checking settings file for old session ID...");
+                    
+                    string jsonContent = File.ReadAllText(settingsPath);
+                    
+                    // Check if the old SessionId field exists and has a value
+                    if (jsonContent.Contains("\"SessionId\""))
+                    {
+                        LogMessage("🔍 FOUND: Old SessionId field in settings file");
+                        
+                        // Parse JSON and remove the SessionId field
+                        var jsonObject = Newtonsoft.Json.JsonConvert.DeserializeObject<dynamic>(jsonContent);
+                        
+                        if (jsonObject != null)
+                        {
+                            // Remove the SessionId property if it exists
+                            if (jsonObject.SessionId != null)
+                            {
+                                LogMessage("🗑️ REMOVING: Old SessionId field from settings file");
+                                jsonObject.SessionId = null;
+                                
+                                // Write back the cleaned JSON
+                                string cleanedJson = Newtonsoft.Json.JsonConvert.SerializeObject(jsonObject, Newtonsoft.Json.Formatting.Indented);
+                                File.WriteAllText(settingsPath, cleanedJson);
+                                
+                                LogMessage("✅ CLEANED: Old SessionId removed from settings file - now using secure storage only");
+                            }
+                            else
+                            {
+                                LogMessage("✅ CLEAN: Settings file already has no SessionId value");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        LogMessage("✅ CLEAN: No old SessionId field found in settings file");
+                    }
+                }
+                else
+                {
+                    LogMessage("ℹ️ INFO: Settings file not found - no cleanup needed");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"⚠️ CLEANUP FAILED: Could not clean settings file: {ex.Message}");
+            }
+        }
+
     // Process connection queue method
     private void ProcessConnectionQueue()
     {
@@ -274,7 +412,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         var newListener = new SearchListener(this, config, LogMessage, LogError);
         _listeners.Add(newListener);
         LogMessage($"🆕 STARTING FROM QUEUE: Search {config.SearchId.Value}");
-        newListener.Start(LogMessage, LogError, Settings.SessionId.Value);
+        newListener.Start(LogMessage, LogError, Settings.SecureSessionId);
     }
 
     public override async void Tick()
@@ -772,7 +910,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 }
 
                 LogMessage($"🔄 ATTEMPTING RESTART: Search {listener.Config.SearchId.Value}");
-                listener.Start(LogMessage, LogError, Settings.SessionId.Value);
+                listener.Start(LogMessage, LogError, Settings.SecureSessionId);
             }
         }
 
