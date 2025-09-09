@@ -296,98 +296,41 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         LogMessage($"[WARNING] {message}");
     }
 
-        // Test session ID validity
-        private async Task TestSessionIdValidity(string sessionId)
+    // Test session ID validity
+    private async Task TestSessionIdValidity(string sessionId)
+    {
+        try
         {
-            try
+            LogMessage("🔍 TESTING: Validating session ID with Path of Exile API...");
+            
+            using (var request = new HttpRequestMessage(HttpMethod.Get, "https://www.pathofexile.com/api/profile"))
             {
-                LogMessage("🔍 TESTING: Validating session ID with Path of Exile API...");
+                request.Headers.Add("Cookie", $"POESESSID={sessionId}");
+                request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
                 
-                using (var request = new HttpRequestMessage(HttpMethod.Get, "https://www.pathofexile.com/api/profile"))
+                using (var response = await _httpClient.SendAsync(request))
                 {
-                    request.Headers.Add("Cookie", $"POESESSID={sessionId}");
-                    request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-                    
-                    using (var response = await _httpClient.SendAsync(request))
+                    if (response.IsSuccessStatusCode)
                     {
-                        if (response.IsSuccessStatusCode)
-                        {
-                            LogMessage("✅ SESSION ID VALID: Successfully authenticated with Path of Exile API");
-                        }
-                        else if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
-                        {
-                            LogMessage("❌ SESSION ID INVALID: 401 Unauthorized - Session ID is expired or invalid");
-                            LogMessage("💡 SOLUTION: Get a fresh POESESSID from pathofexile.com cookies");
-                        }
-                        else
-                        {
-                            LogMessage($"⚠️ SESSION ID TEST: Unexpected response {response.StatusCode} - Session ID may be invalid");
-                        }
+                        LogMessage("✅ SESSION ID VALID: Successfully authenticated with Path of Exile API");
                     }
-                }
-            }
-            catch (Exception ex)
-            {
-                LogMessage($"⚠️ SESSION ID TEST FAILED: {ex.Message}");
-            }
-        }
-
-        // Clean up old session ID from settings file
-        private void CleanupOldSessionIdFromSettings()
-        {
-            try
-            {
-                string settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ExileCore2", "config", "global", "JewYourItem_settings.json");
-                
-                if (File.Exists(settingsPath))
-                {
-                    LogMessage("🧹 CLEANUP: Checking settings file for old session ID...");
-                    
-                    string jsonContent = File.ReadAllText(settingsPath);
-                    
-                    // Check if the old SessionId field exists and has a value
-                    if (jsonContent.Contains("\"SessionId\""))
+                    else if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                     {
-                        LogMessage("🔍 FOUND: Old SessionId field in settings file");
-                        
-                        // Parse JSON and remove the SessionId field
-                        var jsonObject = Newtonsoft.Json.JsonConvert.DeserializeObject<dynamic>(jsonContent);
-                        
-                        if (jsonObject != null)
-                        {
-                            // Remove the SessionId property if it exists
-                            if (jsonObject.SessionId != null)
-                            {
-                                LogMessage("🗑️ REMOVING: Old SessionId field from settings file");
-                                jsonObject.SessionId = null;
-                                
-                                // Write back the cleaned JSON
-                                string cleanedJson = Newtonsoft.Json.JsonConvert.SerializeObject(jsonObject, Newtonsoft.Json.Formatting.Indented);
-                                File.WriteAllText(settingsPath, cleanedJson);
-                                
-                                LogMessage("✅ CLEANED: Old SessionId removed from settings file - now using secure storage only");
-                            }
-                            else
-                            {
-                                LogMessage("✅ CLEAN: Settings file already has no SessionId value");
-                            }
-                        }
+                        LogMessage("❌ SESSION ID INVALID: 401 Unauthorized - Session ID is expired or invalid");
+                        LogMessage("💡 SOLUTION: Get a fresh POESESSID from pathofexile.com cookies");
                     }
                     else
                     {
-                        LogMessage("✅ CLEAN: No old SessionId field found in settings file");
+                        LogMessage($"⚠️ SESSION ID TEST: Unexpected response {response.StatusCode} - Session ID may be invalid");
                     }
                 }
-                else
-                {
-                    LogMessage("ℹ️ INFO: Settings file not found - no cleanup needed");
-                }
-            }
-            catch (Exception ex)
-            {
-                LogMessage($"⚠️ CLEANUP FAILED: Could not clean settings file: {ex.Message}");
             }
         }
+        catch (Exception ex)
+        {
+            LogMessage($"⚠️ SESSION ID TEST FAILED: {ex.Message}");
+        }
+    }
 
     // Process connection queue method
     private void ProcessConnectionQueue()
