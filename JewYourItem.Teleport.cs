@@ -620,13 +620,7 @@ public partial class JewYourItem
                 {
                     outputDevice.Init(audioFile);
                     outputDevice.Play();
-                    
-                    // Wait for playback to complete
-                    while (outputDevice.PlaybackState == PlaybackState.Playing)
-                    {
-                        Thread.Sleep(100);
-                    }
-                }
+a                }
             });
         }
         catch (Exception ex)
