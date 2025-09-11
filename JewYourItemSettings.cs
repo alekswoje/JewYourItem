@@ -35,10 +35,10 @@ public class JewYourItemSettings : ISettings
     }
     [Menu("Travel Hotkey", "Key to initiate travel action")]
     [IgnoreMenu]
-    public HotkeyNode TravelHotkey { get; set; } = new HotkeyNode();
+    public HotkeyNode TravelHotkey { get; set; } = new HotkeyNode(Keys.None);
     [Menu("Stop All Hotkey", "Key to force stop all searches")]
     [IgnoreMenu]
-    public HotkeyNode StopAllHotkey { get; set; } = new HotkeyNode();
+    public HotkeyNode StopAllHotkey { get; set; } = new HotkeyNode(Keys.None);
     [Menu("Play Sound", "Enable sound alerts for new items")]
     [IgnoreMenu]
     public ToggleNode PlaySound { get; set; } = new ToggleNode(true);
