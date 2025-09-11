@@ -9,6 +9,7 @@ public class RecentItem
     public string Price { get; set; }
     public string HideoutToken { get; set; }
     public string ItemId { get; set; }
+    public string SearchId { get; set; } // Added to track which search this item came from
     public int X { get; set; }
     public int Y { get; set; }
     public DateTime AddedTime { get; set; }

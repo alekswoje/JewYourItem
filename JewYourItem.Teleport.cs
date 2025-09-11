@@ -188,6 +188,9 @@ public partial class JewYourItem
         
         // Set the current teleporting item for GUI display
         _currentTeleportingItem = currentItem;
+
+        // Store the teleported item info for auto-buy log updates
+        _teleportedItemInfo = currentItem;
         var request = new HttpRequestMessage(HttpMethod.Post, "https://www.pathofexile.com/api/trade2/whisper")
         {
             Content = new StringContent($"{{ \"token\": \"{currentItem.HideoutToken}\", \"continue\": true }}", Encoding.UTF8, "application/json")
@@ -518,9 +521,47 @@ public partial class JewYourItem
             // Auto Buy: Perform Ctrl+Left Click if enabled
             if (Settings.AutoBuy.Value)
             {
-                LogInfo("🛒 AUTO BUY: Enabled, performing purchase click...");
+                LogMessage($"🛒 AUTO BUY START: Beginning auto-buy process for coordinates ({x}, {y})");
+
+                // Find the item being processed and update the log entry
+                LogMessage($"🔍 LOOKING FOR ITEM AT COORDINATES: ({x}, {y})");
+
+                // First try to find in recent items (for fallback)
+                RecentItem itemBeingProcessed = FindRecentItemByCoordinates(x, y);
+
+                // If not found in recent items, try the teleported item info
+                if (itemBeingProcessed == null && _teleportedItemInfo != null)
+                {
+                    LogMessage($"🔄 USING TELEPORTED ITEM INFO: '{_teleportedItemInfo.Name}' (Search: {_teleportedItemInfo.SearchId})");
+                    itemBeingProcessed = _teleportedItemInfo;
+                }
+
+                if (itemBeingProcessed != null)
+                {
+                    LogMessage($"✅ FOUND ITEM FOR LOG UPDATE: '{itemBeingProcessed.Name}' (Search: {itemBeingProcessed.SearchId}) at ({x}, {y})");
+                    LogMessage($"🔄 CALLING UPDATE AUTO-BUY ATTEMPT...");
+                    UpdateAutoBuyAttempt(itemBeingProcessed.Name, itemBeingProcessed.SearchId);
+                    LogMessage($"✅ UPDATE AUTO-BUY ATTEMPT COMPLETED");
+
+                    // Clear the teleported item info after successful update
+                    _teleportedItemInfo = null;
+                }
+                else
+                {
+                    LogMessage($"❌ COULD NOT FIND ITEM FOR COORDINATES ({x}, {y}) - NO LOG UPDATE POSSIBLE");
+                    LogMessage($"💡 Checked both recent items and teleported item info");
+                }
+
+                LogMessage("⏳ AUTO BUY DELAY: Waiting 100ms before click...");
                 await Task.Delay(100); // Small delay to ensure mouse movement is complete
+
+                LogMessage("🖱️ AUTO BUY CLICK: Performing Ctrl+Left Click");
                 await PerformCtrlLeftClickAsync();
+                LogMessage("✅ AUTO BUY COMPLETE: Ctrl+Left Click performed");
+            }
+            else
+            {
+                LogMessage("🚫 AUTO BUY SKIPPED: Auto-buy is disabled in settings");
             }
         }
         catch (Exception ex)
@@ -608,39 +649,73 @@ public partial class JewYourItem
 
 
 
-    public async Task PlaySoundWithNAudio(string soundPath, Action<string> logMessage, Action<string> logError)
+    public void PlaySoundWithNAudio(string soundPath, Action<string> logMessage, Action<string> logError)
     {
-        try
+        // Fire and forget - don't await to avoid any delays
+        Task.Run(async () =>
         {
-            // Use Task.Run to avoid blocking the UI thread
-            await Task.Run(() =>
+            try
             {
                 using (var audioFile = new AudioFileReader(soundPath))
                 using (var outputDevice = new WaveOutEvent())
                 {
                     outputDevice.Init(audioFile);
                     outputDevice.Play();
+                    
+                    // Wait for playback to complete without blocking the main thread
+                    while (outputDevice.PlaybackState == PlaybackState.Playing)
+                    {
+                        await Task.Delay(10); // Small delay to prevent busy waiting
+                    }
                 }
-            });
-        }
-        catch (Exception ex)
-        {
-            logError($"NAudio playback failed: {ex.Message}");
-            
-            // Fallback to System.Media.SoundPlayer if NAudio fails
-            try
+            }
+            catch (Exception ex)
             {
-                logMessage("Attempting fallback to System.Media.SoundPlayer...");
-                using (var player = new System.Media.SoundPlayer(soundPath))
+                logError($"NAudio playback failed: {ex.Message}");
+                
+                // Fallback to System.Media.SoundPlayer if NAudio fails
+                try
                 {
-                    player.Play();
+                    logMessage("Attempting fallback to System.Media.SoundPlayer...");
+                    using (var player = new System.Media.SoundPlayer(soundPath))
+                    {
+                        player.Play();
+                    }
+                    logMessage("Fallback audio playback successful");
                 }
-                logMessage("Fallback audio playback successful");
+                catch (Exception fallbackEx)
+                {
+                    logError($"Fallback audio playback also failed: {fallbackEx.Message}");
+                }
             }
-            catch (Exception fallbackEx)
+        });
+    }
+
+    /// <summary>
+    /// Finds a recent item by its stash coordinates
+    /// </summary>
+    /// <param name="x">X coordinate in stash</param>
+    /// <param name="y">Y coordinate in stash</param>
+    /// <returns>The RecentItem if found, null otherwise</returns>
+    private RecentItem FindRecentItemByCoordinates(int x, int y)
+    {
+        lock (_recentItemsLock)
+        {
+            LogMessage($"🔍 SEARCHING FOR ITEM: Looking for coordinates ({x}, {y}) in {_recentItems.Count} recent items");
+
+            // Search through recent items to find one with matching coordinates
+            foreach (var item in _recentItems)
             {
-                logError($"Fallback audio playback also failed: {fallbackEx.Message}");
+                LogMessage($"📋 CHECKING ITEM: '{item.Name}' at ({item.X}, {item.Y}) - SearchId: {item.SearchId}");
+                if (item.X == x && item.Y == y)
+                {
+                    LogMessage($"✅ FOUND MATCHING ITEM: '{item.Name}' at ({x}, {y})");
+                    return item;
+                }
             }
+
+            LogMessage($"❌ NO ITEM FOUND for coordinates ({x}, {y})");
         }
+        return null;
     }
 }

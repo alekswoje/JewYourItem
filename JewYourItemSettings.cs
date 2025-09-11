@@ -35,10 +35,10 @@ public class JewYourItemSettings : ISettings
     }
     [Menu("Travel Hotkey", "Key to initiate travel action")]
     [IgnoreMenu]
-    public HotkeyNode TravelHotkey { get; set; } = new HotkeyNode(Keys.F5);
+    public HotkeyNode TravelHotkey { get; set; } = new HotkeyNode();
     [Menu("Stop All Hotkey", "Key to force stop all searches")]
     [IgnoreMenu]
-    public HotkeyNode StopAllHotkey { get; set; } = new HotkeyNode(Keys.F7);
+    public HotkeyNode StopAllHotkey { get; set; } = new HotkeyNode();
     [Menu("Play Sound", "Enable sound alerts for new items")]
     [IgnoreMenu]
     public ToggleNode PlaySound { get; set; } = new ToggleNode(true);
@@ -59,6 +59,7 @@ public class JewYourItemSettings : ISettings
     [Menu("Max Recent Items", "Maximum number of recent items to keep in the list")]
     [IgnoreMenu]
     public RangeNode<int> MaxRecentItems { get; set; } = new RangeNode<int>(5, 1, 20);
+    [JsonIgnore]
     public Vector2 WindowPosition { get; set; } = new Vector2(10, 800);
     
     // Purchase window learning settings
@@ -75,6 +76,12 @@ public class JewYourItemSettings : ISettings
     [Menu("Cancel With Right Click", "Cancel operation on manual right-click")]
     [IgnoreMenu]
     public ToggleNode CancelWithRightClick { get; set; } = new ToggleNode(true);
+
+        // Log Search Results settings
+        [Menu("Log Search Results", "Enable logging of search results to a text file")]
+        [IgnoreMenu]
+        public ToggleNode LogSearchResults { get; set; } = new ToggleNode(true);
+
    
     [Submenu(RenderMethod = nameof(Render))]
     public class GroupsRenderer
@@ -121,34 +128,30 @@ public class JewYourItemSettings : ISettings
                 var groupNameBuffer = _groupNameBuffers[groupIdKey];
                 groupNameBuffer = group.Name.Value; // Sync buffer with current value
                 
-                // Apply colors based on current state
-                if (group.Enable.Value)
-                {
-                    ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.0f, 1.0f, 0.0f, 1.0f));
-                    ImGui.PushStyleColor(ImGuiCol.HeaderHovered, new Vector4(0.0f, 0.8f, 0.0f, 1.0f));
-                }
+                bool groupEnabled = group.Enable.Value;
                 bool isOpen = ImGui.CollapsingHeader($"Group##group{i}"); // Static ID for header
-                ImGui.SameLine();
-                
-                // Add visual indicator for enabled/disabled state
-                if (group.Enable.Value)
-                {
-                    ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), "● "); // Green dot for enabled
-                }
-                else
-                {
-                    ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1.0f), "○ "); // Gray dot for disabled
-                }
-                
-                ImGui.SameLine();
-                ImGui.Text(group.Name.Value); // Display dynamic name
-                
-                // Shift+Click to enable/disable group
+
+                // Handle shift-click on the header
                 if (ImGui.IsItemClicked(ImGuiMouseButton.Left) && ImGui.GetIO().KeyShift)
                 {
                     group.Enable.Value = !group.Enable.Value;
-                    // Visual feedback is provided by the colored dots
+                    groupEnabled = group.Enable.Value; // Update local state immediately
                 }
+
+                ImGui.SameLine();
+
+                // Simple ON/OFF text with color
+                if (groupEnabled)
+                {
+                    ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), "[ON]"); // Green ON for enabled
+                }
+                else
+                {
+                    ImGui.TextColored(new Vector4(1.0f, 0.0f, 0.0f, 1.0f), "[OFF]"); // Red OFF for disabled
+                }
+
+                ImGui.SameLine();
+                ImGui.Text(group.Name.Value); // Display dynamic name
                 
                 if (_parent.CancelWithRightClick.Value && ImGui.IsItemClicked(ImGuiMouseButton.Right))
                 {
@@ -166,10 +169,6 @@ public class JewYourItemSettings : ISettings
                 }
                 if (isOpen)
                 {
-                    if (group.Enable.Value)
-                    {
-                        ImGui.PopStyleColor(2);
-                    }
                     ImGui.Indent();
                     if (ImGui.InputText($"Name##group{i}", ref groupNameBuffer, 100))
                     {
@@ -236,33 +235,31 @@ public class JewYourItemSettings : ISettings
                         }
                         var searchNameBuffer = _searchNameBuffers[searchIdKey];
                         searchNameBuffer = search.Name.Value; // Sync buffer with current value
-                        if (search.Enable.Value)
-                        {
-                            ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.0f, 1.0f, 0.0f, 1.0f));
-                            ImGui.PushStyleColor(ImGuiCol.HeaderHovered, new Vector4(0.0f, 0.8f, 0.0f, 1.0f));
-                        }
+
+                        bool searchEnabled = search.Enable.Value;
                         bool sOpen = ImGui.CollapsingHeader($"Search##search{i}{j}"); // Static ID for header
-                        ImGui.SameLine();
-                        
-                        // Add visual indicator for enabled/disabled state
-                        if (search.Enable.Value)
-                        {
-                            ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), "● "); // Green dot for enabled
-                        }
-                        else
-                        {
-                            ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1.0f), "○ "); // Gray dot for disabled
-                        }
-                        
-                        ImGui.SameLine();
-                        ImGui.Text(search.Name.Value); // Display dynamic name
-                        
-                        // Shift+Click to enable/disable search
+
+                        // Handle shift-click on the header
                         if (ImGui.IsItemClicked(ImGuiMouseButton.Left) && ImGui.GetIO().KeyShift)
                         {
                             search.Enable.Value = !search.Enable.Value;
-                            // Visual feedback is provided by the colored dots
+                            searchEnabled = search.Enable.Value; // Update local state immediately
                         }
+
+                        ImGui.SameLine();
+
+                        // Simple ON/OFF text with color
+                        if (searchEnabled)
+                        {
+                            ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), "[ON]"); // Green ON for enabled
+                        }
+                        else
+                        {
+                            ImGui.TextColored(new Vector4(1.0f, 0.0f, 0.0f, 1.0f), "[OFF]"); // Red OFF for disabled
+                        }
+
+                        ImGui.SameLine();
+                        ImGui.Text(search.Name.Value); // Display dynamic name
                         
                         if (_parent.CancelWithRightClick.Value && ImGui.IsItemClicked(ImGuiMouseButton.Right))
                         {
@@ -272,10 +269,6 @@ public class JewYourItemSettings : ISettings
                         }
                         if (sOpen)
                         {
-                            if (search.Enable.Value)
-                            {
-                                ImGui.PopStyleColor(2);
-                            }
                             ImGui.Indent();
                             var senable = search.Enable.Value;
                             ImGui.Checkbox($"Enable##search{i}{j}", ref senable);
@@ -295,17 +288,9 @@ public class JewYourItemSettings : ISettings
                             HelpMarker("Unique ID for the trade search");
                             ImGui.Unindent();
                         }
-                        else if (search.Enable.Value)
-                        {
-                            ImGui.PopStyleColor(2);
-                        }
                     }
                     group.Searches = tempSearches;
                     ImGui.Unindent();
-                }
-                else if (group.Enable.Value)
-                {
-                    ImGui.PopStyleColor(2);
                 }
                 ImGui.Separator();
             }
@@ -323,14 +308,6 @@ public class JewYourItemSettings : ISettings
                     TradeUrl = new TextNode("")
                 });
             }
-            var pos = _parent.WindowPosition;
-            ImGui.Text("Window Position:");
-            ImGui.SameLine();
-            float x = pos.X, y = pos.Y;
-            ImGui.InputFloat("X##WindowPosX", ref x, 1.0f, 100.0f, "%.0f");
-            ImGui.InputFloat("Y##WindowPosY", ref y, 1.0f, 100.0f, "%.0f");
-            _parent.WindowPosition = new Vector2(x, y);
-            HelpMarker("Position of the settings window on screen");
         }
     }
 

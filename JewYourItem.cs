@@ -97,6 +97,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private (int x, int y)? _teleportedItemLocation = null;
     private bool _isManualTeleport = false;
     private RecentItem _currentTeleportingItem = null;
+    private RecentItem _teleportedItemInfo = null; // Store item info for teleported items
     private readonly object _recentItemsLock = new object();
 
     // Dynamic TP cooldown state
@@ -137,6 +138,12 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         {
             LogMessage("❌ ERROR: Session ID is empty. Please set it in the settings.");
             LogMessage("💡 TIP: Go to plugin settings and enter your POESESSID from pathofexile.com cookies");
+            LogMessage("📋 HOW TO GET POESESSID:");
+            LogMessage("   1. Go to pathofexile.com and log in");
+            LogMessage("   2. Press F12 to open Developer Tools");
+            LogMessage("   3. Go to Application/Storage → Cookies → pathofexile.com");
+            LogMessage("   4. Copy the POESESSID value (32 characters)");
+            LogMessage("   5. Paste it in the plugin settings");
         }
         else
         {
@@ -236,7 +243,9 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         // Only clear recent items as they're location-specific
         _recentItems.Clear();
         // DON'T clear _teleportedItemLocation - we need it to persist until purchase window opens
-        LogMessage("📦 Cleared recent items due to area change (preserved teleported location for mouse movement)");
+        // Also clear teleported item info since it might be stale after area change
+        _teleportedItemInfo = null;
+        LogMessage("📦 Cleared recent items and teleported item info due to area change (preserved teleported location for mouse movement)");
     }
 
     // LearnPurchaseWindowCoordinates method
@@ -306,6 +315,12 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     else if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                     {
                         LogMessage("❌ Session ID invalid - please get a fresh POESESSID from pathofexile.com cookies");
+                        LogMessage("📋 HOW TO GET FRESH POESESSID:");
+                        LogMessage("   1. Go to pathofexile.com and log in");
+                        LogMessage("   2. Press F12 to open Developer Tools");
+                        LogMessage("   3. Go to Application/Storage → Cookies → pathofexile.com");
+                        LogMessage("   4. Copy the POESESSID value (32 characters)");
+                        LogMessage("   5. Update it in the plugin settings");
                     }
                     else
                     {
@@ -585,11 +600,9 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
         if (recentSettingsChange)
         {
-            LogMessage("🔄 TICK: Processing listener management (INSTANT - settings changed)...");
         }
         else
         {
-            LogMessage("🔄 TICK: Processing listener management...");
         }
 
         bool currentHotkeyState = Input.GetKeyState(Settings.TravelHotkey.Value);
@@ -638,30 +651,47 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 LogMessage("🎓 LEARNING SKIPPED: No teleported item location available for learning");
             }
         }
-        if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.MoveMouseToItem.Value)
+        if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible)
         {
-            if (_allowMouseMovement && _windowWasClosedSinceLastMovement)
+            LogMessage($"🪟 PURCHASE WINDOW EVENT: MoveMouseToItem={Settings.MoveMouseToItem.Value}, AllowMovement={_allowMouseMovement}, WindowWasClosed={_windowWasClosedSinceLastMovement}, HasTeleportedItem={_teleportedItemLocation.HasValue}, RecentItemsCount={_recentItems.Count}, AutoBuy={Settings.AutoBuy.Value}");
+
+            if (!Settings.MoveMouseToItem.Value)
             {
-                if (_teleportedItemLocation.HasValue)
-                {
-                    LogMessage($"🖱️ SAFE MOUSE MOVE (Main): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
-                    MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
-                    _teleportedItemLocation = null; // Clear after use
-                    _allowMouseMovement = false; // Block further movement until window closes
-                    _windowWasClosedSinceLastMovement = false;
-                }
-                else if (_recentItems.Count > 0)
-                {
-                    LogMessage("🖱️ SAFE FALLBACK MOVE (Main): Window was closed, using most recent item");
-                    var item = _recentItems.Peek();
-                    MoveMouseToItemLocation(item.X, item.Y);
-                    _allowMouseMovement = false; // Block further movement until window closes
-                    _windowWasClosedSinceLastMovement = false;
-                }
+                LogMessage("🚫 MOUSE MOVE DISABLED: MoveMouseToItem setting is disabled");
+                return;
+            }
+
+            if (!_allowMouseMovement)
+            {
+                LogMessage("🚫 MOUSE MOVE BLOCKED: _allowMouseMovement is false (previous movement not completed)");
+                return;
+            }
+
+            if (!_windowWasClosedSinceLastMovement)
+            {
+                LogMessage("🚫 MOUSE MOVE BLOCKED: Window was not closed since last movement (preventing accidental purchases)");
+                return;
+            }
+
+            if (_teleportedItemLocation.HasValue)
+            {
+                LogMessage($"🖱️ SAFE MOUSE MOVE (Main): Window was closed, moving to teleported item at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+                MoveMouseToItemLocation(_teleportedItemLocation.Value.x, _teleportedItemLocation.Value.y);
+                _teleportedItemLocation = null; // Clear after use
+                _allowMouseMovement = false; // Block further movement until window closes
+                _windowWasClosedSinceLastMovement = false;
+            }
+            else if (_recentItems.Count > 0)
+            {
+                LogMessage("🖱️ SAFE FALLBACK MOVE (Main): Window was closed, using most recent item");
+                var item = _recentItems.Peek();
+                MoveMouseToItemLocation(item.X, item.Y);
+                _allowMouseMovement = false; // Block further movement until window closes
+                _windowWasClosedSinceLastMovement = false;
             }
             else
             {
-                LogMessage("🚫 MOUSE MOVE BLOCKED (Main): Purchase window opened but previous window was not closed (preventing accidental purchases)");
+                LogMessage("🚫 NO ITEMS TO PROCESS: No teleported item or recent items available");
             }
         }
         _lastPurchaseWindowVisible = currentPurchaseWindowVisible;
@@ -938,6 +968,7 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             _listeners.Remove(listener);
         }
         _recentItems.Clear();
+        _teleportedItemInfo = null;
         LogMessage("✅ All listeners force stopped - plugin fully disabled.");
     }
 
@@ -1007,10 +1038,342 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         }
     }
 
+    public void OnDisable()
+    {
+        LogMessage("🛑 PLUGIN DISABLED: Stopping all listeners immediately");
+        ForceStopAll();
+    }
+
     public void OnPluginDestroy()
     {
         StopAll();
     }
 
     // DrawSettings method moved to JewYourItem.Gui.cs
+
+    /// <summary>
+    /// Gets the plugin's temp directory path dynamically
+    /// </summary>
+    /// <returns>The full path to the plugin's temp directory</returns>
+    private string GetPluginTempDirectory()
+    {
+        try
+        {
+            // Get the plugin's assembly location
+            string assemblyPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+
+            // Get the directory containing the plugin DLL
+            string pluginDir = Path.GetDirectoryName(assemblyPath);
+
+            // Navigate up to find the Plugins directory
+            DirectoryInfo pluginsDir = Directory.GetParent(pluginDir)?.Parent;
+
+            if (pluginsDir != null && pluginsDir.Name == "Plugins")
+            {
+                // Get the plugin name from the current directory name
+                string pluginName = Path.GetFileName(pluginDir);
+
+                // Construct the temp path: Plugins/Temp/[PluginName]
+                string tempDir = Path.Combine(pluginsDir.FullName, "Temp", pluginName);
+
+                // Ensure the temp directory exists
+                if (!Directory.Exists(tempDir))
+                {
+                    Directory.CreateDirectory(tempDir);
+                }
+
+                return tempDir;
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"Failed to get plugin temp directory: {ex.Message}");
+        }
+
+        // Fallback to current directory if we can't determine the proper path
+        return Directory.GetCurrentDirectory();
+    }
+
+    /// <summary>
+    /// Updates an existing log entry to mark auto-buy as attempted
+    /// </summary>
+    /// <param name="itemName">Name of the item to update</param>
+    /// <param name="searchId">Search ID to identify the entry</param>
+    public void UpdateAutoBuyAttempt(string itemName, string searchId)
+    {
+        LogMessage($"🚀 UPDATE AUTO-BUY ATTEMPT CALLED: Item='{itemName}', SearchId='{searchId}'");
+
+        try
+        {
+            if (!Settings.LogSearchResults.Value)
+            {
+                LogMessage("🚫 LOGGING DISABLED: Search results logging is disabled in settings");
+                return;
+            }
+
+            // Get the plugin's temp directory path dynamically
+            string pluginTempDir = GetPluginTempDirectory();
+            string logFileName = "search_results.csv";
+
+            // Ensure CSV extension
+            if (!logFileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+            {
+                logFileName = Path.ChangeExtension(logFileName, ".csv");
+            }
+
+            string logFilePath = Path.Combine(pluginTempDir, logFileName);
+            LogMessage($"📂 PLUGIN TEMP DIR: {pluginTempDir}");
+            LogMessage($"📄 FULL LOG FILE PATH: {logFilePath}");
+
+            if (!File.Exists(logFilePath))
+            {
+                LogMessage($"❌ CSV FILE DOES NOT EXIST: {logFilePath}");
+                return;
+            }
+
+            LogMessage($"✅ CSV FILE EXISTS: {logFilePath}");
+
+            // Read all lines
+            string[] lines = File.ReadAllLines(logFilePath);
+            LogMessage($"📄 READ {lines.Length} LINES FROM CSV FILE");
+
+            if (lines.Length <= 1) // No data rows
+            {
+                LogMessage("⚠️ CSV FILE HAS NO DATA ROWS (only header)");
+                return;
+            }
+
+            // Update the matching entry
+            bool foundMatch = false;
+            LogMessage($"🔍 SEARCHING FOR LOG ENTRY: Item='{itemName}', SearchId='{searchId}'");
+            LogMessage($"📊 CSV FILE HAS {lines.Length} TOTAL LINES");
+
+            for (int i = 1; i < lines.Length; i++) // Skip header
+            {
+                if (string.IsNullOrWhiteSpace(lines[i])) continue; // Skip empty lines
+
+                string[] fields = ParseCsvLine(lines[i]);
+                string csvItemName = fields.Length > 1 ? fields[1] : "";
+                string csvSearchId = fields.Length > 4 ? fields[4] : "";
+                string csvStatus = fields.Length > 6 ? fields[6] : "";
+
+                LogMessage($"📋 LINE {i}: Raw='{lines[i]}'");
+                LogMessage($"📋 LINE {i}: Parsed - Item='{csvItemName}', SearchId='{csvSearchId}', Status='{csvStatus}'");
+
+                if (fields.Length >= 7)
+                {
+                    // Clean the strings for comparison (remove quotes and trim)
+                    string cleanCsvItemName = csvItemName.Replace("\"", "").Trim();
+                    string cleanCsvSearchId = csvSearchId.Replace("\"", "").Trim();
+                    string cleanItemName = itemName.Replace("\"", "").Trim();
+                    string cleanSearchId = searchId.Replace("\"", "").Trim();
+
+                    LogMessage($"🧹 CLEANED: CSV Item='{cleanCsvItemName}', Search Item='{cleanItemName}'");
+                    LogMessage($"🧹 CLEANED: CSV SearchId='{cleanCsvSearchId}', Search SearchId='{cleanSearchId}'");
+
+                    // Try exact match first
+                    if (cleanCsvItemName == cleanItemName && cleanCsvSearchId == cleanSearchId)
+                    {
+                        LogMessage($"✅ FOUND EXACT MATCH on line {i}: '{cleanCsvItemName}' with '{cleanCsvSearchId}'");
+                        fields[6] = "AUTO-BUY ATTEMPTED"; // Update Purchase Status column
+                        lines[i] = string.Join(",", fields.Select(f => EscapeCsvField(f)));
+                        foundMatch = true;
+                        LogMessage($"✏️ UPDATED LINE {i} TO: {lines[i]}");
+                        break;
+                    }
+                    // Try partial match if exact fails (case-insensitive, substring matching)
+                    else if (cleanCsvItemName.Contains(cleanItemName) || cleanItemName.Contains(cleanCsvItemName))
+                    {
+                        if (cleanCsvSearchId == cleanSearchId)
+                        {
+                            LogMessage($"✅ FOUND PARTIAL ITEM MATCH on line {i}: '{cleanCsvItemName}' contains/substring of '{cleanItemName}'");
+                            fields[6] = "AUTO-BUY ATTEMPTED"; // Update Purchase Status column
+                            lines[i] = string.Join(",", fields.Select(f => EscapeCsvField(f)));
+                            foundMatch = true;
+                            LogMessage($"✏️ UPDATED LINE {i} TO: {lines[i]}");
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    LogMessage($"⚠️ LINE {i} HAS INSUFFICIENT FIELDS: {fields.Length}");
+                }
+            }
+
+            if (!foundMatch)
+            {
+                LogMessage($"❌ NO MATCH FOUND for Item='{itemName}', SearchId='{searchId}'");
+            }
+
+            // Write back the updated lines
+            File.WriteAllLines(logFilePath, lines);
+            LogMessage($"✅ UPDATED AUTO-BUY STATUS: {itemName} marked as attempted");
+
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ FAILED TO UPDATE AUTO-BUY STATUS: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Parses a CSV line into fields, handling quoted values
+    /// </summary>
+    private string[] ParseCsvLine(string line)
+    {
+        var fields = new List<string>();
+        bool inQuotes = false;
+        string currentField = "";
+
+        for (int i = 0; i < line.Length; i++)
+        {
+            char c = line[i];
+
+            if (c == '"')
+            {
+                if (inQuotes && i + 1 < line.Length && line[i + 1] == '"')
+                {
+                    // Escaped quote
+                    currentField += '"';
+                    i++; // Skip next quote
+                }
+                else
+                {
+                    // Toggle quote state
+                    inQuotes = !inQuotes;
+                }
+            }
+            else if (c == ',' && !inQuotes)
+            {
+                // Field separator
+                fields.Add(currentField);
+                currentField = "";
+            }
+            else
+            {
+                currentField += c;
+            }
+        }
+
+        // Add the last field
+        fields.Add(currentField);
+
+        return fields.ToArray();
+    }
+
+    /// <summary>
+    /// Escapes a field for CSV format by wrapping in quotes if it contains commas, quotes, or newlines
+    /// </summary>
+    /// <param name="field">The field value to escape</param>
+    /// <returns>The properly escaped CSV field</returns>
+    private string EscapeCsvField(string field)
+    {
+        if (string.IsNullOrEmpty(field))
+            return "\"\"";
+
+        // If field contains comma, quote, or newline, wrap in quotes and escape internal quotes
+        if (field.Contains(",") || field.Contains("\"") || field.Contains("\n") || field.Contains("\r"))
+        {
+            // Escape internal quotes by doubling them
+            string escaped = field.Replace("\"", "\"\"");
+            return $"\"{escaped}\"";
+        }
+
+        return field;
+    }
+
+    /// <summary>
+    /// Logs search results to a text file with item name, price, and search name
+    /// </summary>
+    /// <param name="itemName">Name of the item</param>
+    /// <param name="price">Price of the item</param>
+    /// <param name="searchName">Name of the search that found this item</param>
+    /// <param name="searchId">ID of the search</param>
+    /// <param name="league">League name</param>
+    /// <param name="autoBuyAttempted">Whether auto-buy was attempted for this item</param>
+    private void LogSearchResult(string itemName, string price, string searchName, string searchId, string league, string autoBuyStatus = "MANUAL BUY")
+    {
+        try
+        {
+            LogMessage($"🔍 LOGGING ATTEMPT: LogSearchResults enabled = {Settings.LogSearchResults.Value}");
+
+            if (!Settings.LogSearchResults.Value)
+            {
+                LogMessage("❌ LOGGING SKIPPED: Search results logging is disabled in settings");
+                return;
+            }
+
+            // Get the plugin's temp directory path dynamically
+            string pluginTempDir = GetPluginTempDirectory();
+            LogMessage($"📂 PLUGIN TEMP DIR: {pluginTempDir}");
+
+            string logFileName = "search_results.csv";
+            LogMessage("📝 USING DEFAULT LOG FILE NAME: search_results.csv");
+
+            // Ensure CSV extension
+            if (!logFileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+            {
+                logFileName = Path.ChangeExtension(logFileName, ".csv");
+                LogMessage($"📝 CHANGED EXTENSION TO CSV: {logFileName}");
+            }
+
+            // Combine the plugin temp directory with the log file name
+            string logFilePath = Path.Combine(pluginTempDir, logFileName);
+            LogMessage($"📄 FULL LOG FILE PATH: {logFilePath}");
+
+            // Ensure the directory exists
+            string directory = Path.GetDirectoryName(logFilePath);
+            LogMessage($"📁 LOG DIRECTORY: {directory}");
+
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+                LogMessage($"✅ CREATED LOG DIRECTORY: {directory}");
+            }
+
+            // Check if file exists and add CSV header if it's new
+            bool isNewFile = !File.Exists(logFilePath);
+            if (isNewFile)
+            {
+                string csvHeader = "Timestamp,Item Name,Price,Search Name,Search ID,League,Purchase Status,Auto Buy Enabled";
+                File.WriteAllText(logFilePath, csvHeader + Environment.NewLine);
+                LogMessage("📝 CREATED NEW CSV FILE WITH HEADER");
+            }
+
+            // Format timestamp
+            string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            bool autoBuyEnabled = Settings.AutoBuy.Value;
+            string autoBuyEnabledStatus = autoBuyEnabled ? "YES" : "NO";
+
+            // Escape CSV fields that might contain commas or quotes
+            string escapedItemName = EscapeCsvField(itemName);
+            string escapedPrice = EscapeCsvField(price);
+            string escapedSearchName = EscapeCsvField(searchName);
+            string escapedLeague = EscapeCsvField(league);
+            string escapedPurchaseStatus = EscapeCsvField(autoBuyStatus);
+
+            // Create CSV line
+            string csvLine = $"{timestamp},{escapedItemName},{escapedPrice},{escapedSearchName},{searchId},{escapedLeague},{escapedPurchaseStatus},{autoBuyEnabledStatus}";
+            LogMessage($"📝 WRITING CSV ENTRY: {csvLine}");
+
+            // Use a lock to prevent concurrent access issues
+            lock (_recentItemsLock)
+            {
+                File.AppendAllText(logFilePath, csvLine + Environment.NewLine);
+                LogMessage($"✅ SUCCESSFULLY WROTE TO CSV FILE: {logFilePath}");
+            }
+
+            // Log debug message if debug mode is enabled
+            if (Settings.DebugMode.Value)
+            {
+                LogDebug($"📝 LOGGED CSV: {csvLine}");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ FAILED TO LOG SEARCH RESULT: {ex.Message}");
+            LogError($"❌ STACK TRACE: {ex.StackTrace}");
+        }
+    }
 }

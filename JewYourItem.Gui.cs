@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Windows.Forms;
@@ -264,6 +265,7 @@ public partial class JewYourItem
         }
     }
 
+
     public override void DrawSettings()
     {
         // Check if plugin was just disabled and clean up if needed
@@ -285,22 +287,6 @@ public partial class JewYourItem
             LogMessage("✅ Session ID updated securely (not logged for security)");
         }
         
-        // Show current storage status
-        bool hasSecureSessionId = !string.IsNullOrEmpty(Settings.SecureSessionId);
-        bool hasRegularSessionId = !string.IsNullOrEmpty(Settings.SessionId.Value);
-        
-        if (hasSecureSessionId)
-        {
-            ImGui.Text("🔐 Secure storage: Active");
-        }
-        else if (hasRegularSessionId)
-        {
-            ImGui.Text("⚠️ Regular storage: Consider migrating to secure storage");
-        }
-        else
-        {
-            ImGui.Text("❌ No session ID stored");
-        }
         if (!ImGui.IsItemActive())
         {
             _settingsUpdated = false;
@@ -382,7 +368,6 @@ public partial class JewYourItem
             _settingsUpdated = false;
         }
 
-        ImGui.Text("TP Cooldown: Dynamic (locked until window loads or 10s timeout)");
 
         var moveMouseToItem = Settings.MoveMouseToItem.Value;
         ImGui.Checkbox("Move Mouse to Item on Load", ref moveMouseToItem);
@@ -438,64 +423,58 @@ public partial class JewYourItem
             ImGui.SetTooltip("Maximum number of recent items to keep in the list (1-20)");
         }
 
-        ImGui.Separator();
-        
-        // SECURE SESSION ID MANAGEMENT
-        ImGui.Text("🔐 Secure Session ID Management:");
-        if (ImGui.Button("Migrate to Secure Storage"))
+        // Log Search Results settings
+        var logSearchResults = Settings.LogSearchResults.Value;
+        ImGui.Checkbox("Log Search Results", ref logSearchResults);
+        if (ImGui.IsItemDeactivatedAfterEdit() && !_settingsUpdated)
         {
-            if (!string.IsNullOrEmpty(Settings.SessionId.Value))
+            Settings.LogSearchResults.Value = logSearchResults;
+            _settingsUpdated = true;
+            LogMessage($"Log Search Results setting changed to: {logSearchResults}");
+        }
+        if (!ImGui.IsItemActive())
+        {
+            _settingsUpdated = false;
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Log all search results to a text file");
+        }
+
+        if (ImGui.Button("📁 Open Log Location"))
+        {
+            try
             {
-                Settings.SecureSessionId = Settings.SessionId.Value;
-                LogMessage("✅ Session ID migrated to secure storage");
+                // Get the plugin's temp directory and construct the full log file path
+                string pluginTempDir = GetPluginTempDirectory();
+                string logFileName = "search_results.csv";
+                string fullLogPath = Path.Combine(pluginTempDir, logFileName);
+                string directory = Path.GetDirectoryName(fullLogPath);
+
+                if (Directory.Exists(directory))
+                {
+                    // Open the plugin's temp directory in Windows Explorer
+                    System.Diagnostics.Process.Start("explorer.exe", directory);
+                    LogMessage($"Opened plugin log directory: {directory}");
+                }
+                else
+                {
+                    // If directory doesn't exist, create it and then open it
+                    Directory.CreateDirectory(directory);
+                    System.Diagnostics.Process.Start("explorer.exe", directory);
+                    LogMessage($"Created and opened plugin log directory: {directory}");
+                }
             }
-            else
+            catch (Exception ex)
             {
-                LogMessage("❌ No regular session ID to migrate");
+                LogError($"Failed to open log directory: {ex.Message}");
             }
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Migrate your regular session ID to secure Windows Credential Manager storage");
+            ImGui.SetTooltip("Open the log file directory in Windows Explorer");
         }
-        
-        ImGui.SameLine();
-        if (ImGui.Button("Clear All Session IDs"))
-        {
-            EncryptedSettings.ClearSecureSessionId();
-            Settings.SessionId.Value = "";
-            _sessionIdBuffer = "";
-            LogMessage("🗑️ All stored session IDs cleared securely");
-        }
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Clear both secure and regular session ID storage");
-        }
-        
-        ImGui.SameLine();
-        if (ImGui.Button("Test Session ID"))
-        {
-            string secureSessionId = Settings.SecureSessionId;
-            string regularSessionId = Settings.SessionId.Value;
-            
-            if (!string.IsNullOrEmpty(secureSessionId))
-            {
-                LogMessage("✅ Secure session ID is accessible");
-            }
-            else if (!string.IsNullOrEmpty(regularSessionId))
-            {
-                LogMessage("⚠️ Only regular session ID found (consider migrating to secure storage)");
-            }
-            else
-            {
-                LogMessage("❌ No session ID found in any storage");
-            }
-        }
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Test which session ID storage methods are working");
-        }
-        
+
         ImGui.Separator();
         
         // EMERGENCY CONTROLS
@@ -511,61 +490,6 @@ public partial class JewYourItem
             }
             ImGui.PopStyleColor(1);
             ImGui.Separator();
-        }
-        
-        // Stop All button
-        if (ImGui.Button("🛑 Stop All Searches"))
-        {
-            LogMessage("🛑 STOP ALL BUTTON PRESSED: Force stopping all searches");
-            ForceStopAll();
-        }
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Stop all active search listeners");
-        }
-        
-        if (ImGui.Button("Show Rate Limit Status"))
-        {
-            if (_rateLimiter != null)
-            {
-                _rateLimiter.LogCurrentState();
-            }
-            else
-            {
-                LogMessage("Rate limiter not initialized yet.");
-            }
-            LogMessage($"Global connection attempts: {JewYourItem._globalConnectionAttempts}");
-        }
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Display current rate limit status in the console");
-        }
-
-        ImGui.Separator();
-        if (ImGui.Button("Test Move Mouse to Recent Item"))
-        {
-            RecentItem item = null;
-            lock (_recentItemsLock)
-            {
-                if (_recentItems.Count > 0)
-                {
-                    item = _recentItems.Peek();
-                }
-            }
-            
-            if (item != null)
-            {
-                LogDebug($"Testing move mouse to recent item: {item.Name} at ({item.X}, {item.Y})");
-                MoveMouseToItemLocation(item.X, item.Y);
-            }
-            else
-            {
-                LogDebug("No recent items available for mouse movement test");
-            }
-        }
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Test moving mouse to the most recent item (requires purchase window to be open). Will also test Auto Buy if enabled.");
         }
 
         base.DrawSettings();

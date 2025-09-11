@@ -449,6 +449,7 @@ public partial class JewYourItem
                                                     Price = price,
                                                     HideoutToken = item.Listing.HideoutToken,
                                                     ItemId = item.Id,
+                                                    SearchId = Config.SearchId.Value, // Track which search this item came from
                                                     X = x,
                                                     Y = y,
                                                     AddedTime = DateTime.Now,
@@ -459,6 +460,11 @@ public partial class JewYourItem
                                                 _parent._recentItems.Enqueue(recentItem);
                                                 while (_parent._recentItems.Count > _parent.Settings.MaxRecentItems.Value)
                                                     _parent._recentItems.Dequeue();
+                                                
+                                                // Log search result to file if enabled
+                                                bool autoBuyEnabled = _parent.Settings.AutoBuy.Value;
+                                                string initialStatus = autoBuyEnabled ? "AUTO-BUY PENDING" : "MANUAL BUY";
+                                                _parent.LogSearchResult(name, price, Config.Name.Value, Config.SearchId.Value, Config.League.Value, initialStatus);
                                                 if (_parent._playSound)
                                                 {
                                                     logMessage("Attempting to play sound...");
@@ -505,7 +511,7 @@ public partial class JewYourItem
                                                         if (soundPath != null)
                                                         {
                                                             logMessage($"Playing sound file: {soundFileName}...");
-                                                            await _parent.PlaySoundWithNAudio(soundPath, logMessage, logError);
+                                                            _parent.PlaySoundWithNAudio(soundPath, logMessage, logError);
                                                             logMessage("Sound played successfully!");
                                                         }
                                                         else
@@ -725,6 +731,12 @@ public partial class JewYourItem
                 if (_parent.Settings.AutoBuy.Value)
                 {
                     logMessage("🛒 AUTO BUY: Enabled, performing purchase click...");
+
+                    // Find the item being processed and update the log entry
+                    // For SearchListener, we need to find the item by coordinates
+                    // This is more complex here, so for now we'll note it was attempted
+                    // The main plugin's MoveMouseToItemLocation will handle the detailed logging
+
                     await Task.Delay(100); // Small delay to ensure mouse movement is complete
                     await _parent.PerformCtrlLeftClickAsync();
                 }
