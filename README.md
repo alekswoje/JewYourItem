@@ -248,6 +248,6 @@ This plugin is for educational and personal use only. Automated trading may viol
 
 ---
 
-**Version**: 2.0.0
-**Last Updated**: September 2024
+**Version**: 1.0.0
+**Last Updated**: September 2025
 **Compatibility**: Path of Exile 2 + ExileCore2
