@@ -56,6 +56,14 @@ public class JewYourItemSettings : ISettings
     [IgnoreMenu]
     public ToggleNode AutoBuy { get; set; } = new ToggleNode(false);
     
+    [Menu("Fast Mode", "Bypass window checks and directly move cursor + click on area load")]
+    [IgnoreMenu]
+    public ToggleNode FastMode { get; set; } = new ToggleNode(false);
+    
+    [Menu("Fast Mode Cooldown", "Delay between actions in Fast Mode (milliseconds)")]
+    [IgnoreMenu]
+    public RangeNode<int> FastModeTickDelay { get; set; } = new RangeNode<int>(16, 1, 100);
+    
     [Menu("Max Recent Items", "Maximum number of recent items to keep in the list")]
     [IgnoreMenu]
     public RangeNode<int> MaxRecentItems { get; set; } = new RangeNode<int>(5, 1, 20);

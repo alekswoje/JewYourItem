@@ -18,6 +18,7 @@ using System.IO;
 using System.Net;
 using System.IO.Compression;
 using NAudio.Wave;
+using System.Runtime.InteropServices;
 using System.Media;
 using System.Windows.Forms;
 using System.Text.RegularExpressions;
@@ -48,6 +49,20 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     [DllImport("user32.dll")]
     static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    // RECT structure for window coordinates
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
 
     // Mouse event constants
     private const uint MOUSEEVENTF_MOVE = 0x0001;
@@ -107,6 +122,17 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     // Purchase window state tracking to prevent accidental purchases
     private bool _allowMouseMovement = true;
     private bool _windowWasClosedSinceLastMovement = true;
+    
+    // Fast mode frame-based execution
+    private bool _fastModePending = false;
+    private (int x, int y) _fastModeCoords;
+    private int _fastModeFrameCount = 0;
+    private DateTime _fastModeStartTime;
+    private int _fastModeClickCount = 0;
+    
+    // Cached purchase window position for Fast Mode
+    private (float x, float y) _cachedPurchaseWindowTopLeft = (0, 0);
+    private bool _hasCachedPosition = false;
 
     // Connection queue system
     private readonly Queue<JewYourItemInstanceSettings> _connectionQueue = new Queue<JewYourItemInstanceSettings>();
@@ -246,6 +272,144 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         // Also clear teleported item info since it might be stale after area change
         _teleportedItemInfo = null;
         LogMessage("📦 Cleared recent items and teleported item info due to area change (preserved teleported location for mouse movement)");
+
+        // FAST MODE: Direct cursor movement and click on area load
+        if (Settings.FastMode.Value && _teleportedItemLocation.HasValue)
+        {
+            LogMessage($"⚡ FAST MODE: Area loaded, directly moving cursor and clicking at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
+            
+            // Store coordinates for frame-based execution
+            var coords = _teleportedItemLocation.Value;
+            _teleportedItemLocation = null; // Clear immediately to prevent double execution
+            
+            // Schedule frame-based execution
+            _fastModePending = true;
+            _fastModeCoords = coords;
+            _fastModeFrameCount = 0;
+            _fastModeStartTime = DateTime.Now;
+            _fastModeClickCount = 0;
+        }
+    }
+
+    // CachePurchaseWindowPosition method
+    private void CachePurchaseWindowPosition()
+    {
+        try
+        {
+            var purchaseWindow = GameController?.IngameState?.IngameUi?.PurchaseWindowHideout;
+            if (purchaseWindow != null)
+            {
+                var stashContainer = purchaseWindow.TabContainer?.VisibleStash;
+                if (stashContainer != null)
+                {
+                    var stashRect = stashContainer.GetClientRectCache;
+                    var topLeft = stashRect.TopLeft;
+                    _cachedPurchaseWindowTopLeft = (topLeft.X, topLeft.Y);
+                    _hasCachedPosition = true;
+                    LogMessage($"🎯 CACHED POSITION: Stash container TopLeft=({topLeft.X}, {topLeft.Y})");
+                }
+                else
+                {
+                    LogMessage("⚠️ CACHE FAILED: Stash container is null");
+                }
+            }
+            else
+            {
+                LogMessage("⚠️ CACHE FAILED: Purchase window is null");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"⚠️ CACHE FAILED: Could not cache purchase window position: {ex.Message}");
+        }
+    }
+
+    // TryExecuteFastMode method
+    private async Task<bool> TryExecuteFastMode()
+    {
+        try
+        {
+            var purchaseWindow = GameController?.IngameState?.IngameUi?.PurchaseWindowHideout;
+            LogMessage($"⚡ FAST MODE: PurchaseWindow={purchaseWindow != null}");
+            
+            if (purchaseWindow != null)
+            {
+                // Get the stash container position - this is already screen coordinates!
+                var stashContainer = purchaseWindow.TabContainer?.VisibleStash;
+                if (stashContainer != null)
+                {
+                    var stashRect = stashContainer.GetClientRectCache;
+                    var topLeft = stashRect.TopLeft;
+                    LogMessage($"⚡ FAST MODE: Stash container rect=({stashRect.X}, {stashRect.Y}, {stashRect.Width}, {stashRect.Height})");
+                    LogMessage($"⚡ FAST MODE: Stash container TopLeft=({topLeft.X}, {topLeft.Y})");
+                    
+                    // Cache this position for future use
+                    _cachedPurchaseWindowTopLeft = (topLeft.X, topLeft.Y);
+                    _hasCachedPosition = true;
+                    
+                    // Calculate cell size based on stash container dimensions (assuming 12x12 grid)
+                    float cellWidth = stashRect.Width / 12.0f;
+                    float cellHeight = stashRect.Height / 12.0f;
+                    
+                    // Calculate item position within the stash container using TopLeft as base
+                    int itemX = (int)(topLeft.X + (_fastModeCoords.x * cellWidth) + (cellWidth * 7 / 8));
+                    int itemY = (int)(topLeft.Y + (_fastModeCoords.y * cellHeight) + (cellHeight * 7 / 8));
+                    
+                    // TopLeft is already in screen coordinates, so no need to add game window offset
+                    int finalX = itemX;
+                    int finalY = itemY;
+                    
+                    LogMessage($"⚡ FAST MODE: Calculated position - Item=({itemX}, {itemY}), TopLeft=({topLeft.X}, {topLeft.Y}), Final=({finalX}, {finalY})");
+                    
+                    // Move mouse cursor
+                    System.Windows.Forms.Cursor.Position = new System.Drawing.Point(finalX, finalY);
+                    LogMessage($"⚡ FAST MODE: Moved cursor to ({finalX}, {finalY})");
+                    
+                    // First click immediately
+                    await PerformCtrlLeftClickAsync();
+                    LogMessage("⚡ FAST MODE: Click 1/3 performed");
+                    return true;
+                }
+                else
+                {
+                    LogMessage("⚡ FAST MODE: Stash container is null - waiting for next frame");
+                    return false;
+                }
+            }
+            else if (_hasCachedPosition)
+            {
+                // Use cached position if purchase window is not available
+                LogMessage($"⚡ FAST MODE: Using cached position ({_cachedPurchaseWindowTopLeft.x}, {_cachedPurchaseWindowTopLeft.y})");
+                
+                // Use default cell size (32x32) when we don't have the window
+                const float cellWidth = 32.0f;
+                const float cellHeight = 32.0f;
+                
+                int itemX = (int)(_cachedPurchaseWindowTopLeft.x + (_fastModeCoords.x * cellWidth) + (cellWidth * 7 / 8));
+                int itemY = (int)(_cachedPurchaseWindowTopLeft.y + (_fastModeCoords.y * cellHeight) + (cellHeight * 7 / 8));
+                
+                LogMessage($"⚡ FAST MODE: Cached calculation - Item=({itemX}, {itemY}), Cached=({_cachedPurchaseWindowTopLeft.x}, {_cachedPurchaseWindowTopLeft.y}), Final=({itemX}, {itemY})");
+                
+                // Move mouse cursor
+                System.Windows.Forms.Cursor.Position = new System.Drawing.Point(itemX, itemY);
+                LogMessage($"⚡ FAST MODE: Moved cursor to ({itemX}, {itemY})");
+                
+                // First click immediately
+                await PerformCtrlLeftClickAsync();
+                LogMessage("⚡ FAST MODE: Click 1/3 performed");
+                return true;
+            }
+            else
+            {
+                LogMessage("⚡ FAST MODE: PurchaseWindow is null and no cached position - waiting for next frame");
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"⚡ FAST MODE ERROR: {ex.Message}");
+            return false;
+        }
     }
 
     // LearnPurchaseWindowCoordinates method
@@ -275,6 +439,23 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private bool IsKeyPressed(Keys key)
     {
         return Input.GetKeyState(key);
+    }
+
+    /// <summary>
+    /// Calculates exponential backoff delay based on attempt count
+    /// </summary>
+    /// <param name="attemptCount">Number of connection attempts</param>
+    /// <returns>Delay in milliseconds</returns>
+    private int CalculateExponentialBackoffDelay(int attemptCount)
+    {
+        if (attemptCount <= 0) return 0;
+        
+        // Exponential backoff with reasonable limits:
+        // Attempt 1: 1s, 2: 2s, 3: 4s, 4: 8s, 5: 16s, 6: 32s, 7: 60s, 8: 120s, 9: 300s, 10: 600s, 11+: 1800s (30min)
+        int[] delays = { 1000, 2000, 4000, 8000, 16000, 32000, 60000, 120000, 300000, 600000, 1800000 };
+        
+        int index = Math.Min(attemptCount - 1, delays.Length - 1);
+        return delays[index];
     }
 
     // Logging helper methods
@@ -363,11 +544,107 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     public override async void Tick()
     {
+        // DEBUG: Always log loading state to help debug timing issues
+        try
+        {
+            bool isLoading = GameController?.IsLoading ?? true;
+            bool inGame = GameController?.InGame ?? false;
+            string areaName = GameController?.Area?.CurrentArea?.Name ?? "null";
+            LogMessage($"🔄 TICK DEBUG: IsLoading={isLoading}, InGame={inGame}, Area={areaName}");
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"🔄 TICK DEBUG ERROR: {ex.Message}");
+        }
+        
+        // Cache purchase window position when available
+        if (!_hasCachedPosition)
+        {
+            CachePurchaseWindowPosition();
+        }
+        
+        // FAST MODE: Time-based execution
+        if (_fastModePending)
+        {
+            var elapsed = DateTime.Now - _fastModeStartTime;
+            var tickDelay = Settings.FastModeTickDelay.Value;
+            
+            LogMessage($"⚡ FAST MODE: Elapsed={elapsed.TotalMilliseconds:F1}ms, TickDelay={tickDelay}ms, ClickCount={_fastModeClickCount}");
+            
+            // Try to execute cursor movement and clicks
+            bool executed = false;
+            
+            if (_fastModeClickCount == 0)
+            {
+                // First execution: Move cursor and perform first click immediately
+                LogMessage("⚡ FAST MODE: Starting execution - move cursor and first click");
+                executed = await TryExecuteFastMode();
+                if (executed)
+                {
+                    _fastModeClickCount = 1;
+                }
+            }
+            else if (_fastModeClickCount == 1 && elapsed.TotalMilliseconds >= tickDelay)
+            {
+                // Second click: After one tick delay
+                LogMessage("⚡ FAST MODE: Second click");
+                try
+                {
+                    await PerformCtrlLeftClickAsync();
+                    LogMessage("⚡ FAST MODE: Click 2/3 performed");
+                    _fastModeClickCount = 2;
+                    executed = true;
+                }
+                catch (Exception ex)
+                {
+                    LogError($"⚡ FAST MODE ERROR: {ex.Message}");
+                }
+            }
+            else if (_fastModeClickCount == 2 && elapsed.TotalMilliseconds >= (tickDelay * 3))
+            {
+                // Third click: After three tick delays
+                LogMessage("⚡ FAST MODE: Third click");
+                try
+                {
+                    await PerformCtrlLeftClickAsync();
+                    LogMessage("⚡ FAST MODE: Click 3/3 performed");
+                    executed = true;
+                }
+                catch (Exception ex)
+                {
+                    LogError($"⚡ FAST MODE ERROR: {ex.Message}");
+                }
+                finally
+                {
+                    // Reset fast mode state
+                    _fastModePending = false;
+                    _fastModeClickCount = 0;
+                    LogMessage("⚡ FAST MODE: Execution completed, resetting state");
+                }
+            }
+            
+            // Timeout protection: If we've been trying for too long, give up
+            if (!executed && elapsed.TotalMilliseconds > 2000) // 2 second timeout
+            {
+                LogMessage("⚡ FAST MODE: Timeout reached, giving up");
+                _fastModePending = false;
+                _fastModeClickCount = 0;
+            }
+            
+            if (executed)
+            {
+                return; // Skip the rest of the tick processing
+            }
+        }
+        
         // CRITICAL: IMMEDIATE PLUGIN DISABLE CHECK - HIGHEST PRIORITY
         if (!Settings.Enable.Value)
         {
-            LogMessage("🛑 PLUGIN DISABLED: Stopping all listeners immediately");
-            ForceStopAll();
+            if (_listeners.Count > 0)
+            {
+                LogMessage($"🛑 PLUGIN DISABLED: Stopping {_listeners.Count} active listeners immediately");
+                ForceStopAll();
+            }
             return;
         }
 
@@ -407,9 +684,13 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             _lastEnableState = Settings.Enable.Value;
             if (!Settings.Enable.Value)
             {
-                LogMessage("🛑 PLUGIN JUST DISABLED: Force stopping all listeners");
+                LogMessage($"🛑 PLUGIN JUST DISABLED: Force stopping {_listeners.Count} active listeners");
                 ForceStopAll();
                 return;
+            }
+            else
+            {
+                LogMessage("✅ PLUGIN JUST ENABLED: Plugin is now active");
             }
         }
 
@@ -577,6 +858,14 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         }
 
         _lastTickProcessTime = DateTime.Now;
+
+        // SAFETY CHECK: If plugin is disabled, ensure all listeners are stopped
+        if (!Settings.Enable.Value && _listeners.Count > 0)
+        {
+            LogMessage($"🛑 SAFETY CHECK: Plugin disabled but {_listeners.Count} listeners still active - forcing stop");
+            ForceStopAll();
+            return;
+        }
 
         // Process connection queue first
         ProcessConnectionQueue();
@@ -824,11 +1113,11 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             }
             else if (!listener.IsRunning && !listener.IsConnecting)
             {
-                // Check global throttling first
+                // Check global throttling with exponential backoff
                 if (JewYourItem._globalConnectionAttempts >= 3)
                 {
-                    int globalWait = 5000 * (JewYourItem._globalConnectionAttempts - 2);
-                    LogMessage($"🌐 GLOBAL THROTTLE: Skipping restart due to global attempts ({JewYourItem._globalConnectionAttempts}), waiting {globalWait}ms");
+                    int globalDelay = CalculateExponentialBackoffDelay(JewYourItem._globalConnectionAttempts);
+                    LogMessage($"🌐 GLOBAL THROTTLE: Skipping restart due to global attempts ({JewYourItem._globalConnectionAttempts}), using exponential backoff ({globalDelay/1000}s)");
                     continue;
                 }
 
@@ -839,33 +1128,16 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     continue;
                 }
 
-                if ((DateTime.Now - listener.LastConnectionAttempt).TotalSeconds < 60)
-                {
-                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} connection throttled ({60 - (DateTime.Now - listener.LastConnectionAttempt).TotalSeconds:F1}s remaining)");
-                    continue;
-                }
-
-                if (listener.ConnectionAttempts >= 2 && (DateTime.Now - listener.LastConnectionAttempt).TotalHours < 1)
-                {
-                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded restart attempts (2 per HOUR)");
-                    continue;
-                }
-
-                if (listener.ConnectionAttempts >= 5)
-                {
-                    LogMessage($"🚨 EMERGENCY RESTART BLOCK: Search {listener.Config.SearchId.Value} exceeded TOTAL session restart limit (5 EVER)");
-                    continue;
-                }
-
-                // Use delay for retries instead of immediate restart
+                // Exponential backoff: Calculate delay based on attempt count
                 if (listener.ConnectionAttempts > 0)
                 {
-                    int delayMs = 1000 * (int)Math.Pow(2, listener.ConnectionAttempts - 1);
-                    delayMs = Math.Min(delayMs, 30000); // Max 30 seconds
-
+                    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s, 120s, 300s, 600s, 1800s (30min)
+                    int delayMs = CalculateExponentialBackoffDelay(listener.ConnectionAttempts);
+                    
                     if ((DateTime.Now - listener.LastConnectionAttempt).TotalMilliseconds < delayMs)
                     {
-                        LogMessage($"⏳ DELAYED RESTART: Search {listener.Config.SearchId.Value} waiting {delayMs - (DateTime.Now - listener.LastConnectionAttempt).TotalMilliseconds:F0}ms");
+                        int remainingMs = delayMs - (int)(DateTime.Now - listener.LastConnectionAttempt).TotalMilliseconds;
+                        LogMessage($"⏳ EXPONENTIAL BACKOFF: Search {listener.Config.SearchId.Value} waiting {remainingMs/1000}s (attempt #{listener.ConnectionAttempts})");
                         continue;
                     }
                 }
@@ -912,10 +1184,11 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     continue;
                 }
 
-                // EMERGENCY: Prevent rapid creation (but allow user-initiated restarts)
+                // EMERGENCY: Use exponential backoff for new listener creation
                 if (JewYourItem._globalConnectionAttempts >= 5 && !recentSettingsChange)
                 {
-                    LogMessage($"🚨 EMERGENCY: Preventing new listener creation - global limit reached ({JewYourItem._globalConnectionAttempts} attempts)");
+                    int emergencyDelay = CalculateExponentialBackoffDelay(JewYourItem._globalConnectionAttempts);
+                    LogMessage($"🚨 EMERGENCY BACKOFF: Preventing new listener creation - global attempts ({JewYourItem._globalConnectionAttempts}), using {emergencyDelay/1000}s delay");
                     continue;
                 }
                 else if (recentSettingsChange && JewYourItem._globalConnectionAttempts >= 1)
@@ -961,15 +1234,34 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     private void ForceStopAll()
     {
-        LogMessage("🚨 FORCE STOPPING: All listeners due to plugin disable...");
-        foreach (var listener in _listeners.ToList())
+        int listenerCount = _listeners.Count;
+        LogMessage($"🚨 FORCE STOPPING: {listenerCount} active listeners due to plugin disable...");
+        
+        if (listenerCount > 0)
         {
-            listener.Stop();
-            _listeners.Remove(listener);
+            foreach (var listener in _listeners.ToList())
+            {
+                try
+                {
+                    LogMessage($"🛑 STOPPING LISTENER: {listener.Config.SearchId.Value} (Running: {listener.IsRunning}, Connecting: {listener.IsConnecting})");
+                    listener.Stop();
+                }
+                catch (Exception ex)
+                {
+                    LogError($"❌ ERROR STOPPING LISTENER {listener.Config.SearchId.Value}: {ex.Message}");
+                }
+                finally
+                {
+                    _listeners.Remove(listener);
+                }
+            }
         }
+        
         _recentItems.Clear();
         _teleportedItemInfo = null;
-        LogMessage("✅ All listeners force stopped - plugin fully disabled.");
+        _connectionQueue.Clear();
+        
+        LogMessage($"✅ FORCE STOP COMPLETE: {listenerCount} listeners stopped, {_listeners.Count} remaining");
     }
 
     private void StopDisabledListeners()
@@ -1040,13 +1332,24 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
 
     public void OnDisable()
     {
-        LogMessage("🛑 PLUGIN DISABLED: Stopping all listeners immediately");
+        LogMessage("🛑 ON DISABLE CALLED: Plugin is being disabled by framework");
         ForceStopAll();
+        
+        // Additional safety check - ensure all listeners are stopped
+        if (_listeners.Count > 0)
+        {
+            LogError($"⚠️ WARNING: {_listeners.Count} listeners still active after OnDisable - forcing cleanup");
+            _listeners.Clear();
+        }
+        
+        LogMessage("✅ ON DISABLE COMPLETE: Plugin fully disabled");
     }
 
     public void OnPluginDestroy()
     {
-        StopAll();
+        LogMessage("🛑 ON PLUGIN DESTROY: Plugin is being destroyed");
+        ForceStopAll();
+        LogMessage("✅ ON PLUGIN DESTROY COMPLETE: Plugin fully destroyed");
     }
 
     // DrawSettings method moved to JewYourItem.Gui.cs
@@ -1057,41 +1360,135 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     /// <returns>The full path to the plugin's temp directory</returns>
     private string GetPluginTempDirectory()
     {
-        try
+        // Try multiple approaches to find the correct temp directory
+        string[] possiblePaths = GetPossibleTempDirectories();
+        
+        foreach (string tempDir in possiblePaths)
         {
-            // Get the plugin's assembly location
-            string assemblyPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
-
-            // Get the directory containing the plugin DLL
-            string pluginDir = Path.GetDirectoryName(assemblyPath);
-
-            // Navigate up to find the Plugins directory
-            DirectoryInfo pluginsDir = Directory.GetParent(pluginDir)?.Parent;
-
-            if (pluginsDir != null && pluginsDir.Name == "Plugins")
+            try
             {
-                // Get the plugin name from the current directory name
-                string pluginName = Path.GetFileName(pluginDir);
-
-                // Construct the temp path: Plugins/Temp/[PluginName]
-                string tempDir = Path.Combine(pluginsDir.FullName, "Temp", pluginName);
-
-                // Ensure the temp directory exists
                 if (!Directory.Exists(tempDir))
                 {
                     Directory.CreateDirectory(tempDir);
+                    LogMessage($"📁 CREATED TEMP DIRECTORY: {tempDir}");
                 }
-
+                
+                LogMessage($"✅ USING TEMP DIRECTORY: {tempDir}");
                 return tempDir;
+            }
+            catch (Exception ex)
+            {
+                LogDebug($"❌ FAILED TO USE TEMP DIRECTORY '{tempDir}': {ex.Message}");
+            }
+        }
+        
+        // Last resort fallback
+        LogError($"❌ ALL TEMP DIRECTORY ATTEMPTS FAILED, USING CURRENT DIRECTORY: {Directory.GetCurrentDirectory()}");
+        return Directory.GetCurrentDirectory();
+    }
+
+    /// <summary>
+    /// Gets possible temp directory paths in order of preference
+    /// </summary>
+    /// <returns>Array of possible temp directory paths</returns>
+    private string[] GetPossibleTempDirectories()
+    {
+        var paths = new List<string>();
+        
+        try
+        {
+            // Method 1: Based on assembly location (Plugins/Source/JewYourItem/ -> Plugins/Temp/JewYourItem/)
+            string assemblyPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            string pluginDir = Path.GetDirectoryName(assemblyPath);
+            DirectoryInfo pluginsDir = Directory.GetParent(pluginDir)?.Parent;
+            
+            if (pluginsDir != null && pluginsDir.Name == "Plugins")
+            {
+                string pluginName = Path.GetFileName(pluginDir);
+                string tempDir = Path.Combine(pluginsDir.FullName, "Temp", pluginName);
+                paths.Add(tempDir);
+                LogDebug($"🔍 METHOD 1 - Assembly-based: {tempDir}");
             }
         }
         catch (Exception ex)
         {
-            LogError($"Failed to get plugin temp directory: {ex.Message}");
+            LogDebug($"❌ METHOD 1 FAILED: {ex.Message}");
         }
+        
+        try
+        {
+            // Method 2: Look for Plugins directory in current working directory
+            string currentDir = Directory.GetCurrentDirectory();
+            string pluginsDir = Path.Combine(currentDir, "Plugins");
+            
+            if (Directory.Exists(pluginsDir))
+            {
+                string tempDir = Path.Combine(pluginsDir, "Temp", "JewYourItem");
+                paths.Add(tempDir);
+                LogDebug($"🔍 METHOD 2 - Current dir based: {tempDir}");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"❌ METHOD 2 FAILED: {ex.Message}");
+        }
+        
+        try
+        {
+            // Method 3: Look for Plugins directory in parent of current directory
+            string currentDir = Directory.GetCurrentDirectory();
+            string parentDir = Directory.GetParent(currentDir)?.FullName;
+            if (parentDir != null)
+            {
+                string pluginsDir = Path.Combine(parentDir, "Plugins");
+                if (Directory.Exists(pluginsDir))
+                {
+                    string tempDir = Path.Combine(pluginsDir, "Temp", "JewYourItem");
+                    paths.Add(tempDir);
+                    LogDebug($"🔍 METHOD 3 - Parent dir based: {tempDir}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"❌ METHOD 3 FAILED: {ex.Message}");
+        }
+        
+        // Method 4: Application data fallback
+        string appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ExileCore2", "Plugins", "Temp", "JewYourItem");
+        paths.Add(appDataDir);
+        LogDebug($"🔍 METHOD 4 - AppData fallback: {appDataDir}");
+        
+        return paths.ToArray();
+    }
 
-        // Fallback to current directory if we can't determine the proper path
-        return Directory.GetCurrentDirectory();
+    /// <summary>
+    /// Tests the temp directory functionality and logs the results
+    /// </summary>
+    public void TestTempDirectory()
+    {
+        LogMessage("🧪 TESTING TEMP DIRECTORY FUNCTIONALITY...");
+        
+        string tempDir = GetPluginTempDirectory();
+        LogMessage($"📂 TEMP DIRECTORY: {tempDir}");
+        
+        // Test file creation
+        string testFile = Path.Combine(tempDir, "test.txt");
+        try
+        {
+            File.WriteAllText(testFile, "Test file created by JewYourItem plugin");
+            LogMessage($"✅ TEST FILE CREATED: {testFile}");
+            
+            // Clean up test file
+            File.Delete(testFile);
+            LogMessage($"🗑️ TEST FILE CLEANED UP");
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ TEST FILE CREATION FAILED: {ex.Message}");
+        }
+        
+        LogMessage("🧪 TEMP DIRECTORY TEST COMPLETE");
     }
 
     /// <summary>

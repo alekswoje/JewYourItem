@@ -27,7 +27,7 @@ public partial class JewYourItem
             // If plugin is disabled, ensure all listeners are stopped
             if (_listeners.Count > 0)
             {
-                LogMessage("🛑 PLUGIN DISABLED: Force stopping all listeners from Render method");
+                LogMessage($"🛑 PLUGIN DISABLED: Force stopping {_listeners.Count} active listeners from Render method");
                 ForceStopAll();
             }
             return;
@@ -271,7 +271,7 @@ public partial class JewYourItem
         // Check if plugin was just disabled and clean up if needed
         if (!Settings.Enable.Value && _listeners.Count > 0)
         {
-            LogMessage("🛑 PLUGIN DISABLED: Force stopping all listeners from DrawSettings method");
+            LogMessage($"🛑 PLUGIN DISABLED: Force stopping {_listeners.Count} active listeners from DrawSettings method");
             ForceStopAll();
         }
         
@@ -400,9 +400,38 @@ public partial class JewYourItem
             ImGui.SetTooltip("Automatically perform Ctrl+Left Click after moving mouse to item location");
         }
 
+        var fastMode = Settings.FastMode.Value;
+        ImGui.Checkbox("Fast Mode?", ref fastMode);
+        if (ImGui.IsItemDeactivatedAfterEdit() && !_settingsUpdated)
+        {
+            Settings.FastMode.Value = fastMode;
+            _settingsUpdated = true;
+            LogMessage($"Fast Mode setting changed to: {fastMode}");
+        }
+        if (!ImGui.IsItemActive())
+        {
+            _settingsUpdated = false;
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("EXTREMELY IMPORTANT: Change your area refresh delay in core settings for this to work well at all. Bypasses window checks and directly moves cursor + clicks on area load.");
+        }
+
+        var fastModeTickDelay = Settings.FastModeTickDelay.Value;
+        ImGui.SliderInt("Fast Mode Cooldown (ms)", ref fastModeTickDelay, 1, 100);
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            Settings.FastModeTickDelay.Value = fastModeTickDelay;
+            LogMessage($"Fast Mode Cooldown setting changed to: {fastModeTickDelay}ms");
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Delay between actions in Fast Mode. Lower values = faster execution. Default: 16ms");
+        }
+
         var maxRecentItems = Settings.MaxRecentItems.Value;
         ImGui.SliderInt("Max Recent Items", ref maxRecentItems, 1, 20);
-        if (ImGui.IsItemDeactivatedAfterEdit() && !_settingsUpdated)
+        if (ImGui.IsItemDeactivatedAfterEdit())
         {
             Settings.MaxRecentItems.Value = maxRecentItems;
             // Trim queue if new limit is smaller
@@ -411,12 +440,7 @@ public partial class JewYourItem
                 while (_recentItems.Count > maxRecentItems)
                     _recentItems.Dequeue();
             }
-            _settingsUpdated = true;
             LogDebug($"Max Recent Items setting changed to: {maxRecentItems}");
-        }
-        if (!ImGui.IsItemActive())
-        {
-            _settingsUpdated = false;
         }
         if (ImGui.IsItemHovered())
         {
@@ -489,6 +513,16 @@ public partial class JewYourItem
                 LogMessage("Emergency shutdown reset by user");
             }
             ImGui.PopStyleColor(1);
+            
+            ImGui.SameLine();
+            if (ImGui.Button("TEST TEMP DIRECTORY"))
+            {
+                TestTempDirectory();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Test the temp directory functionality and show where search results are saved");
+            }
             ImGui.Separator();
         }
 

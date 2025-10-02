@@ -526,14 +526,27 @@ public partial class JewYourItem
                 // Find the item being processed and update the log entry
                 LogMessage($"🔍 LOOKING FOR ITEM AT COORDINATES: ({x}, {y})");
 
-                // First try to find in recent items (for fallback)
-                RecentItem itemBeingProcessed = FindRecentItemByCoordinates(x, y);
+                RecentItem itemBeingProcessed = null;
 
-                // If not found in recent items, try the teleported item info
-                if (itemBeingProcessed == null && _teleportedItemInfo != null)
+                // Retry lookup up to 3 times with small delays to allow state to settle
+                const int maxFindAttempts = 3;
+                for (int attempt = 1; attempt <= maxFindAttempts && itemBeingProcessed == null; attempt++)
                 {
-                    LogMessage($"🔄 USING TELEPORTED ITEM INFO: '{_teleportedItemInfo.Name}' (Search: {_teleportedItemInfo.SearchId})");
-                    itemBeingProcessed = _teleportedItemInfo;
+                    // First try to find in recent items (for fallback)
+                    itemBeingProcessed = FindRecentItemByCoordinates(x, y);
+
+                    // If not found in recent items, try the teleported item info
+                    if (itemBeingProcessed == null && _teleportedItemInfo != null)
+                    {
+                        LogMessage($"🔄 USING TELEPORTED ITEM INFO: '{_teleportedItemInfo.Name}' (Search: {_teleportedItemInfo.SearchId})");
+                        itemBeingProcessed = _teleportedItemInfo;
+                    }
+
+                    if (itemBeingProcessed == null)
+                    {
+                        LogMessage($"⏳ ITEM NOT FOUND (attempt {attempt}/{maxFindAttempts}), retrying in 100ms...");
+                        await Task.Delay(100);
+                    }
                 }
 
                 if (itemBeingProcessed != null)
@@ -543,21 +556,23 @@ public partial class JewYourItem
                     UpdateAutoBuyAttempt(itemBeingProcessed.Name, itemBeingProcessed.SearchId);
                     LogMessage($"✅ UPDATE AUTO-BUY ATTEMPT COMPLETED");
 
-                    // Clear the teleported item info after successful update
+                    // Small delay to ensure mouse movement is complete
+                    LogMessage("⏳ AUTO BUY DELAY: Waiting 100ms before click...");
+                    await Task.Delay(100);
+
+                    LogMessage("🖱️ AUTO BUY CLICK: Performing Ctrl+Left Click");
+                    await PerformCtrlLeftClickAsync();
+                    LogMessage("✅ AUTO BUY COMPLETE: Ctrl+Left Click performed");
+
+                    // Clear the teleported item info after successful purchase attempt
                     _teleportedItemInfo = null;
                 }
                 else
                 {
-                    LogMessage($"❌ COULD NOT FIND ITEM FOR COORDINATES ({x}, {y}) - NO LOG UPDATE POSSIBLE");
+                    LogMessage($"❌ ITEM NOT FOUND AFTER RETRIES for coordinates ({x}, {y}) - skipping auto-buy click");
                     LogMessage($"💡 Checked both recent items and teleported item info");
+                    return;
                 }
-
-                LogMessage("⏳ AUTO BUY DELAY: Waiting 100ms before click...");
-                await Task.Delay(100); // Small delay to ensure mouse movement is complete
-
-                LogMessage("🖱️ AUTO BUY CLICK: Performing Ctrl+Left Click");
-                await PerformCtrlLeftClickAsync();
-                LogMessage("✅ AUTO BUY COMPLETE: Ctrl+Left Click performed");
             }
             else
             {

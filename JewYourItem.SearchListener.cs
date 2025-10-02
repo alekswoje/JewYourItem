@@ -37,10 +37,45 @@ public partial class JewYourItem
         public bool LastIsRunning { get; set; } = false;
         public bool LastIsConnecting { get; set; } = false;
 
+        // Transient upstream errors from GGG that should NOT trigger cooldown
+        private bool IsBenignTransientError(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            try
+            {
+                var t = text.ToLowerInvariant();
+                // Expandable list; starting with error code 7
+                if (t.Contains("error code 7") || t.Contains("code 7") || t.Contains("error code: 7"))
+                    return true;
+                // Some reports mention "us" code; keep flexible match
+                if (t.Contains("error code us") || t.Contains("code us"))
+                    return true;
+            }
+            catch { }
+            return false;
+        }
+
         // Exponential backoff fields
         private int _currentRetryDelay = 1000; // Start with 1 second
         private const int MaxRetryDelay = 30000; // Max 30 seconds
         private const int BackoffMultiplier = 2;
+
+        /// <summary>
+        /// Calculates exponential backoff delay based on attempt count
+        /// </summary>
+        /// <param name="attemptCount">Number of connection attempts</param>
+        /// <returns>Delay in milliseconds</returns>
+        private int CalculateExponentialBackoffDelay(int attemptCount)
+        {
+            if (attemptCount <= 0) return 0;
+            
+            // Exponential backoff with reasonable limits:
+            // Attempt 1: 1s, 2: 2s, 3: 4s, 4: 8s, 5: 16s, 6: 32s, 7: 60s, 8: 120s, 9: 300s, 10: 600s, 11+: 1800s (30min)
+            int[] delays = { 1000, 2000, 4000, 8000, 16000, 32000, 60000, 120000, 300000, 600000, 1800000 };
+            
+            int index = Math.Min(attemptCount - 1, delays.Length - 1);
+            return delays[index];
+        }
 
         public SearchListener(JewYourItem parent, JewYourItemInstanceSettings config, Action<string> logMessage, Action<string> logError)
         {
@@ -98,26 +133,18 @@ public partial class JewYourItem
                     return;
                 }
 
-                // BLOCK: Max 10 attempts, then 15 minutes cooldown
-                if (ConnectionAttempts >= 10)
+                // Gradual reset: Reduce attempt count over time to allow recovery
+                if ((DateTime.Now - LastConnectionAttempt).TotalHours >= 1)
                 {
-                    if ((DateTime.Now - LastConnectionAttempt).TotalMinutes < 15)
-                    {
-                        _logMessage($"🚨 TEMP BLOCK: Search {Config.SearchId.Value} reached 10 attempts, waiting 15 minutes before retry");
-                        return;
-                    }
-                    else
-                    {
-                        // Reset after 15 minutes
-                        ConnectionAttempts = 0;
-                        _logMessage($"♻️ TEMP BLOCK RESET: Search {Config.SearchId.Value} attempts counter reset, resuming search");
-                    }
+                    // Reset attempts after 1 hour to allow recovery
+                    ConnectionAttempts = 0;
+                    _logMessage($"♻️ ATTEMPT RESET: Search {Config.SearchId.Value} attempts counter reset after 1 hour, resuming search");
                 }
-
-                // Reset connection attempts partially if more than 10 minutes passed since last attempt
-                if ((DateTime.Now - LastConnectionAttempt).TotalMinutes >= 10)
+                else if ((DateTime.Now - LastConnectionAttempt).TotalMinutes >= 30)
                 {
-                    ConnectionAttempts = Math.Min(ConnectionAttempts, 5); // Partial reset
+                    // Partial reset after 30 minutes
+                    ConnectionAttempts = Math.Max(0, ConnectionAttempts - 2);
+                    _logMessage($"♻️ PARTIAL RESET: Search {Config.SearchId.Value} attempts reduced to {ConnectionAttempts} after 30 minutes");
                 }
 
                 // Set connection state flags
@@ -177,8 +204,9 @@ public partial class JewYourItem
                 // Only increment global counter AFTER successful connection
                 JewYourItem._globalConnectionAttempts++;
 
-                // Reset retry delay after successful connection
+                // Reset retry delay and connection attempts after successful connection
                 _currentRetryDelay = 1000;
+                ConnectionAttempts = 0; // Reset attempts on successful connection
 
                 lock (_connectionLock)
                 {
@@ -192,8 +220,8 @@ public partial class JewYourItem
             }
             catch (Exception ex)
             {
-                // Increase delay for next attempt (exponential backoff)
-                _currentRetryDelay = Math.Min(_currentRetryDelay * BackoffMultiplier, MaxRetryDelay);
+                // Use the same exponential backoff system as the main plugin
+                _currentRetryDelay = CalculateExponentialBackoffDelay(ConnectionAttempts);
 
                 lock (_connectionLock)
                 {
@@ -254,7 +282,18 @@ public partial class JewYourItem
                     {
                         string fullMessage = await reader.ReadToEndAsync();
                         fullMessage = CleanMessage(fullMessage, logMessage, logError);
-                        await ProcessMessage(fullMessage, logMessage, logError, sessionId);
+                        try
+                        {
+                            await ProcessMessage(fullMessage, logMessage, logError, sessionId);
+                        }
+                        catch (Exception pmEx)
+                        {
+                            if (!IsBenignTransientError(pmEx.Message))
+                            {
+                                LastErrorTime = DateTime.Now;
+                            }
+                            throw;
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -265,7 +304,10 @@ public partial class JewYourItem
                         IsConnecting = false;
                     }
                     logError($"❌ WEBSOCKET ERROR: {Config.SearchId.Value}: {ex.Message}");
-                    LastErrorTime = DateTime.Now;
+                    if (!IsBenignTransientError(ex.Message))
+                    {
+                        LastErrorTime = DateTime.Now;
+                    }
                     break;
                 }
             }
@@ -471,7 +513,7 @@ public partial class JewYourItem
                                                     try
                                                     {
                                                         var assemblyLocation = System.Reflection.Assembly.GetExecutingAssembly().Location;
-                                                        var assemblyDir = Path.GetDirectoryName(assemblyLocation);
+                                                        var assemblyDir = string.IsNullOrEmpty(assemblyLocation) ? null : Path.GetDirectoryName(assemblyLocation);
 
                                                         int randomNumber = _random.Next(1, 10001); // 1 in 10,000 chance
                                                         bool playRareSound = randomNumber == 1;
@@ -485,30 +527,34 @@ public partial class JewYourItem
                                                             logMessage("🎉 WHAT ARE YOU DOING STEP BRO! 🎉 (1 in 10,000 chance)");
                                                         }
 
-                                                        var possiblePaths = new[]
+                                                        var candidatePaths = new List<string>();
+                                                        if (!string.IsNullOrEmpty(assemblyDir))
                                                         {
-                                                            Path.Combine(assemblyDir, "sound", soundFileName),
-                                                            Path.Combine("sound", soundFileName),
-                                                            Path.Combine(assemblyDir, "..", "sound", soundFileName),
-                                                            Path.Combine(assemblyDir, "..", "..", "sound", soundFileName),
-                                                            Path.Combine(assemblyDir, "..", "..", "..", "Source", "JewYourItem", "sound", soundFileName),
-                                                            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sound", soundFileName),
-                                                            Path.Combine(Directory.GetCurrentDirectory(), "sound", soundFileName),
-                                                            // Additional paths for development/compilation scenarios
-                                                            Path.Combine(assemblyDir.Replace("Temp", "Source"), "sound", soundFileName),
-                                                            Path.Combine(assemblyDir, "..", "..", "Source", "JewYourItem", "sound", soundFileName),
-                                                            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ExileCore2", "Plugins", "Source", "JewYourItem", "sound", soundFileName)
-                                                        };
+                                                            candidatePaths.Add(Path.Combine(assemblyDir, "sound", soundFileName));
+                                                            candidatePaths.Add(Path.Combine(assemblyDir, "..", "sound", soundFileName));
+                                                            candidatePaths.Add(Path.Combine(assemblyDir, "..", "..", "sound", soundFileName));
+                                                            candidatePaths.Add(Path.Combine(assemblyDir, "..", "..", "..", "Source", "JewYourItem", "sound", soundFileName));
+                                                            var replaced = assemblyDir.Replace("Temp", "Source");
+                                                            if (!string.Equals(replaced, assemblyDir, StringComparison.OrdinalIgnoreCase))
+                                                            {
+                                                                candidatePaths.Add(Path.Combine(replaced, "sound", soundFileName));
+                                                            }
+                                                            candidatePaths.Add(Path.Combine(assemblyDir, "..", "..", "Source", "JewYourItem", "sound", soundFileName));
+                                                        }
+                                                        candidatePaths.Add(Path.Combine("sound", soundFileName));
+                                                        candidatePaths.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory ?? string.Empty, "sound", soundFileName));
+                                                        candidatePaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "sound", soundFileName));
+                                                        candidatePaths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ExileCore2", "Plugins", "Source", "JewYourItem", "sound", soundFileName));
                                                         string soundPath = null;
-                                                        foreach (var path in possiblePaths)
+                                                        foreach (var path in candidatePaths)
                                                         {
-                                                            if (File.Exists(path))
+                                                            if (!string.IsNullOrEmpty(path) && File.Exists(path))
                                                             {
                                                                 soundPath = path;
                                                                 break;
                                                             }
                                                         }
-                                                        if (soundPath != null)
+                                                        if (!string.IsNullOrEmpty(soundPath))
                                                         {
                                                             logMessage($"Playing sound file: {soundFileName}...");
                                                             _parent.PlaySoundWithNAudio(soundPath, logMessage, logError);
@@ -517,9 +563,10 @@ public partial class JewYourItem
                                                         else
                                                         {
                                                             logError("Sound file not found in any of the expected locations:");
-                                                            foreach (var path in possiblePaths)
+                                                            foreach (var path in candidatePaths)
                                                             {
-                                                                logError($"  - {path}");
+                                                                if (!string.IsNullOrEmpty(path))
+                                                                    logError($"  - {path}");
                                                             }
                                                         }
                                                     }
@@ -564,7 +611,10 @@ public partial class JewYourItem
                                     else
                                     {
                                         string errorMessage = await response.Content.ReadAsStringAsync();
-                                        LastErrorTime = DateTime.Now;
+                                        if (!IsBenignTransientError(errorMessage))
+                                        {
+                                            LastErrorTime = DateTime.Now;
+                                        }
                                         // Rate limiting is now handled above
                                         if (response.StatusCode == System.Net.HttpStatusCode.NotFound && errorMessage.Contains("Resource not found; Item no longer available"))
                                         {
@@ -730,15 +780,42 @@ public partial class JewYourItem
                 // Auto Buy: Perform Ctrl+Left Click if enabled
                 if (_parent.Settings.AutoBuy.Value)
                 {
-                    logMessage("🛒 AUTO BUY: Enabled, performing purchase click...");
+                    logMessage("🛒 AUTO BUY: Enabled, attempting guarded purchase...");
 
-                    // Find the item being processed and update the log entry
-                    // For SearchListener, we need to find the item by coordinates
-                    // This is more complex here, so for now we'll note it was attempted
-                    // The main plugin's MoveMouseToItemLocation will handle the detailed logging
+                    // Try to resolve the item by coordinates with retries
+                    RecentItem itemBeingProcessed = null;
+                    const int maxFindAttempts = 3;
+                    for (int attempt = 1; attempt <= maxFindAttempts && itemBeingProcessed == null; attempt++)
+                    {
+                        itemBeingProcessed = _parent.FindRecentItemByCoordinates(x, y);
+                        if (itemBeingProcessed == null && _parent._teleportedItemInfo != null)
+                        {
+                            logMessage($"🔄 USING TELEPORTED ITEM INFO: '{_parent._teleportedItemInfo.Name}' (Search: {_parent._teleportedItemInfo.SearchId})");
+                            itemBeingProcessed = _parent._teleportedItemInfo;
+                        }
+                        if (itemBeingProcessed == null)
+                        {
+                            logMessage($"⏳ ITEM NOT FOUND (attempt {attempt}/{maxFindAttempts}), retrying in 100ms...");
+                            await Task.Delay(100);
+                        }
+                    }
 
-                    await Task.Delay(100); // Small delay to ensure mouse movement is complete
-                    await _parent.PerformCtrlLeftClickAsync();
+                    if (itemBeingProcessed != null)
+                    {
+                        logMessage($"✅ FOUND ITEM FOR LOG UPDATE: '{itemBeingProcessed.Name}' (Search: {itemBeingProcessed.SearchId}) at ({x}, {y})");
+                        _parent.UpdateAutoBuyAttempt(itemBeingProcessed.Name, itemBeingProcessed.SearchId);
+
+                        // Small delay to ensure mouse movement is complete
+                        await Task.Delay(100);
+                        await _parent.PerformCtrlLeftClickAsync();
+
+                        // Clear teleported info after purchase attempt
+                        _parent._teleportedItemInfo = null;
+                    }
+                    else
+                    {
+                        logMessage($"❌ ITEM NOT FOUND AFTER RETRIES for coordinates ({x}, {y}) - skipping auto-buy click");
+                    }
                 }
             }
             catch (Exception ex)
