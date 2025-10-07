@@ -21,8 +21,10 @@ public class JewYourItemSettings : ISettings
 
     public ToggleNode Enable { get; set; } = new ToggleNode(true);
     [Menu("Debug Mode", "Enable detailed logging for debugging")]
-    [IgnoreMenu]
     public ToggleNode DebugMode { get; set; } = new ToggleNode(false);
+    [Menu("Search Queue Delay (ms)", "Delay between starting live searches (250-10000ms)")]
+    [IgnoreMenu]
+    public RangeNode<int> SearchQueueDelay { get; set; } = new RangeNode<int>(1000, 250, 10000);
     [IgnoreMenu]
     public TextNode SessionId { get; set; } = new TextNode("");
     
@@ -60,9 +62,29 @@ public class JewYourItemSettings : ISettings
     [IgnoreMenu]
     public ToggleNode FastMode { get; set; } = new ToggleNode(false);
     
+    [Menu("Fast Mode Initial Clicks", "Number of fast clicks at the start")]
+    [IgnoreMenu]
+    public RangeNode<int> FastModeInitialClicks { get; set; } = new RangeNode<int>(3, 1, 10);
+    
+    [Menu("Fast Mode Initial Delay", "Delay between initial fast clicks (milliseconds)")]
+    [IgnoreMenu]
+    public RangeNode<int> FastModeInitialDelay { get; set; } = new RangeNode<int>(20, 5, 100);
+    
+    [Menu("Fast Mode Main Clicks", "Number of main clicks after initial phase")]
+    [IgnoreMenu]
+    public RangeNode<int> FastModeMainClicks { get; set; } = new RangeNode<int>(30, 5, 100);
+    
+    [Menu("Fast Mode Main Delay", "Delay between main clicks (milliseconds)")]
+    [IgnoreMenu]
+    public RangeNode<int> FastModeMainDelay { get; set; } = new RangeNode<int>(100, 20, 500);
+    
     [Menu("Fast Mode Cooldown", "Delay between actions in Fast Mode (milliseconds)")]
     [IgnoreMenu]
     public RangeNode<int> FastModeTickDelay { get; set; } = new RangeNode<int>(16, 1, 100);
+    
+    [Menu("Fast Mode Click Duration", "Duration for each click in Fast Mode (seconds)")]
+    [IgnoreMenu]
+    public RangeNode<float> FastModeClickDuration { get; set; } = new RangeNode<float>(1.0f, 0.5f, 10.0f);
     
     [Menu("Max Recent Items", "Maximum number of recent items to keep in the list")]
     [IgnoreMenu]
@@ -90,6 +112,16 @@ public class JewYourItemSettings : ISettings
         [IgnoreMenu]
         public ToggleNode LogSearchResults { get; set; } = new ToggleNode(true);
 
+        // Browser opening delay settings
+        [Menu("Browser Tab Delay", "Delay between opening browser tabs (seconds)")]
+        [IgnoreMenu]
+        public RangeNode<int> BrowserTabDelay { get; set; } = new RangeNode<int>(5, 1, 20);
+
+        // Auto Stash settings
+        [Menu("Auto Stash", "Automatically stash items when inventory is full")]
+        [IgnoreMenu]
+        public ToggleNode AutoStash { get; set; } = new ToggleNode(false);
+
    
     [Submenu(RenderMethod = nameof(Render))]
     public class GroupsRenderer
@@ -97,6 +129,10 @@ public class JewYourItemSettings : ISettings
         private readonly JewYourItemSettings _parent;
         private readonly Dictionary<string, string> _groupNameBuffers = new Dictionary<string, string>();
         private readonly Dictionary<string, string> _searchNameBuffers = new Dictionary<string, string>();
+        
+        // Reference to the plugin instance for calling methods
+        public JewYourItem PluginInstance { get; set; }
+        
         public GroupsRenderer(JewYourItemSettings parent)
         {
             _parent = parent;
@@ -294,6 +330,37 @@ public class JewYourItemSettings : ISettings
                             ImGui.InputText($"Search ID##search{i}{j}", ref searchId, 100);
                             search.SearchId.Value = searchId;
                             HelpMarker("Unique ID for the trade search");
+                            
+                            // Add "Open in Browser" button for individual search
+                            if (!string.IsNullOrWhiteSpace(searchId))
+                            {
+                                ImGui.SameLine();
+                                if (ImGui.Button($"🌐##search{i}{j}"))
+                                {
+                                    // Open this specific search in browser
+                                    var searchLeague = search.League.Value;
+                                    if (string.IsNullOrWhiteSpace(searchLeague))
+                                    {
+                                        searchLeague = "Rise of the Abyssal";
+                                    }
+                                    string searchUrl = $"https://www.pathofexile.com/trade2/search/poe2/{Uri.EscapeDataString(searchLeague)}/{searchId}";
+                                    System.Diagnostics.Process.Start("cmd", $"/c start {searchUrl}");
+                                }
+                                if (ImGui.IsItemHovered())
+                                {
+                                    ImGui.SetTooltip($"Open {search.Name.Value} in browser");
+                                }
+                            }
+                            else
+                            {
+                                ImGui.SameLine();
+                                ImGui.TextDisabled("🌐");
+                                if (ImGui.IsItemHovered())
+                                {
+                                    ImGui.SetTooltip("Enter a Search ID to enable browser opening");
+                                }
+                            }
+                            
                             ImGui.Unindent();
                         }
                     }
@@ -316,6 +383,52 @@ public class JewYourItemSettings : ISettings
                     TradeUrl = new TextNode("")
                 });
             }
+            
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
+            
+            // Add "Open All Enabled Searches" button
+            if (ImGui.Button("🌐 Open All Enabled Searches in Browser"))
+            {
+                if (PluginInstance != null)
+                {
+                    PluginInstance.OpenAllEnabledSearchesInBrowser();
+                }
+                else
+                {
+                    // Fallback: manually open searches
+                    var enabledSearches = new List<(string searchId, string league, string name)>();
+                    
+                    foreach (var group in _parent.Groups)
+                    {
+                        if (!group.Enable.Value) continue;
+
+                        foreach (var search in group.Searches)
+                        {
+                            if (search.Enable.Value && !string.IsNullOrWhiteSpace(search.SearchId.Value))
+                            {
+                                enabledSearches.Add((search.SearchId.Value, search.League.Value, search.Name.Value));
+                            }
+                        }
+                    }
+
+                    if (enabledSearches.Count > 0)
+                    {
+                    foreach (var (searchId, searchLeague, name) in enabledSearches)
+                    {
+                        var finalLeague = string.IsNullOrWhiteSpace(searchLeague) ? "Rise of the Abyssal" : searchLeague;
+                        string searchUrl = $"https://www.pathofexile.com/trade2/search/poe2/{Uri.EscapeDataString(finalLeague)}/{searchId}";
+                        System.Diagnostics.Process.Start("cmd", $"/c start {searchUrl}");
+                        
+                        // Add configurable delay between opening tabs
+                        int delayMs = _parent.BrowserTabDelay.Value * 1000; // Convert seconds to milliseconds
+                        System.Threading.Thread.Sleep(delayMs);
+                    }
+                    }
+                }
+            }
+            HelpMarker("Opens all enabled searches in your default browser as separate tabs with configurable delay");
         }
     }
 

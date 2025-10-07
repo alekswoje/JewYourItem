@@ -465,7 +465,6 @@ public partial class JewYourItem
 
     private async void MoveMouseToItemLocation(int x, int y)
     {
-        // CRITICAL: Respect plugin enable state
         if (!Settings.Enable.Value)
         {
             LogMessage("🛑 Mouse movement blocked: Plugin is disabled");

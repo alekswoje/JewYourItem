@@ -62,6 +62,18 @@ public partial class JewYourItem
             ImGui.Spacing();
         }
 
+        // Show auto stash status if in progress
+        if (_autoStashInProgress)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.0f, 1.0f, 1.0f, 1.0f)); // Cyan color
+            ImGui.Text("📦 Auto Stash in Progress...");
+            ImGui.SameLine();
+            var elapsed = DateTime.Now - _autoStashStartTime;
+            ImGui.Text($"({elapsed.Minutes:D2}:{elapsed.Seconds:D2})");
+            ImGui.PopStyleColor();
+            ImGui.Spacing();
+        }
+
         // Use child windows and proper spacing for better auto-sizing
         if (_listeners.Count > 0)
         {
@@ -418,15 +430,63 @@ public partial class JewYourItem
         }
 
         var fastModeTickDelay = Settings.FastModeTickDelay.Value;
-        ImGui.SliderInt("Fast Mode Cooldown (ms)", ref fastModeTickDelay, 1, 100);
+        var originalValue = fastModeTickDelay;
+        ImGui.InputInt("Fast Mode Cooldown (ms)", ref fastModeTickDelay, 1, 10);
+        // Clamp the value to the valid range
+        fastModeTickDelay = Math.Max(1, Math.Min(100, fastModeTickDelay));
+        
+        // Debug logging to track value changes
+        if (fastModeTickDelay != originalValue)
+        {
+            LogMessage($"🔍 DEBUG: FastModeTickDelay changed from {originalValue} to {fastModeTickDelay} (before save)");
+        }
+        
         if (ImGui.IsItemDeactivatedAfterEdit())
         {
+            LogMessage($"🔍 DEBUG: About to save FastModeTickDelay: {fastModeTickDelay}ms");
             Settings.FastModeTickDelay.Value = fastModeTickDelay;
+            LogMessage($"🔍 DEBUG: Saved FastModeTickDelay: {Settings.FastModeTickDelay.Value}ms");
             LogMessage($"Fast Mode Cooldown setting changed to: {fastModeTickDelay}ms");
+        }
+        
+        // Additional debug: Check if value gets reset immediately
+        if (Settings.FastModeTickDelay.Value != fastModeTickDelay)
+        {
+            LogMessage($"⚠️ DEBUG: Value was reset! Expected: {fastModeTickDelay}, Actual: {Settings.FastModeTickDelay.Value}");
         }
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("Delay between actions in Fast Mode. Lower values = faster execution. Default: 16ms");
+        }
+
+        var fastModeClickDuration = Settings.FastModeClickDuration.Value;
+        var originalDuration = fastModeClickDuration;
+        ImGui.InputFloat("Fast Mode Click Duration (s)", ref fastModeClickDuration, 0.1f, 1.0f, "%.1f");
+        // Clamp the value to the valid range
+        fastModeClickDuration = Math.Max(0.5f, Math.Min(10.0f, fastModeClickDuration));
+        
+        // Debug logging to track value changes
+        if (Math.Abs(fastModeClickDuration - originalDuration) > 0.01f)
+        {
+            LogMessage($"🔍 DEBUG: FastModeClickDuration changed from {originalDuration:F1} to {fastModeClickDuration:F1} (before save)");
+        }
+        
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            LogMessage($"🔍 DEBUG: About to save FastModeClickDuration: {fastModeClickDuration:F1}s");
+            Settings.FastModeClickDuration.Value = fastModeClickDuration;
+            LogMessage($"🔍 DEBUG: Saved FastModeClickDuration: {Settings.FastModeClickDuration.Value:F1}s");
+            LogMessage($"Fast Mode Click Duration setting changed to: {fastModeClickDuration:F1}s");
+        }
+        
+        // Additional debug: Check if value gets reset immediately
+        if (Math.Abs(Settings.FastModeClickDuration.Value - fastModeClickDuration) > 0.01f)
+        {
+            LogMessage($"⚠️ DEBUG: Duration was reset! Expected: {fastModeClickDuration:F1}, Actual: {Settings.FastModeClickDuration.Value:F1}");
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Total time to spend clicking in Fast Mode with exponential backoff. Default: 2.0s");
         }
 
         var maxRecentItems = Settings.MaxRecentItems.Value;
@@ -445,6 +505,18 @@ public partial class JewYourItem
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("Maximum number of recent items to keep in the list (1-20)");
+        }
+
+        var searchQueueDelay = Settings.SearchQueueDelay.Value;
+        ImGui.SliderInt("Search Queue Delay (ms)", ref searchQueueDelay, 250, 10000);
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            Settings.SearchQueueDelay.Value = searchQueueDelay;
+            LogMessage($"Search Queue Delay setting changed to: {searchQueueDelay}ms");
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Delay between starting live searches to prevent overwhelming the server (250-10000ms)");
         }
 
         // Log Search Results settings
@@ -498,6 +570,28 @@ public partial class JewYourItem
         {
             ImGui.SetTooltip("Open the log file directory in Windows Explorer");
         }
+
+        // Auto Stash settings
+        ImGui.Separator();
+        ImGui.Text("Auto Stash Settings:");
+        
+        var autoStash = Settings.AutoStash.Value;
+        ImGui.Checkbox("Auto Stash", ref autoStash);
+        if (ImGui.IsItemDeactivatedAfterEdit() && !_settingsUpdated)
+        {
+            Settings.AutoStash.Value = autoStash;
+            _settingsUpdated = true;
+            LogMessage($"Auto Stash setting changed to: {autoStash}");
+        }
+        if (!ImGui.IsItemActive())
+        {
+            _settingsUpdated = false;
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Automatically stash items when inventory is full (2x4 space check)");
+        }
+
 
         ImGui.Separator();
         

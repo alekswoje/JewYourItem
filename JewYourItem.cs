@@ -22,7 +22,6 @@ using System.Runtime.InteropServices;
 using System.Media;
 using System.Windows.Forms;
 using System.Text.RegularExpressions;
-using System.Runtime.InteropServices;
 using JewYourItem.Models;
 using JewYourItem.Utility;
 
@@ -53,6 +52,10 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    // Browser opening functionality
+    [DllImport("shell32.dll")]
+    static extern int ShellExecute(IntPtr hwnd, string lpOperation, string lpFile, string lpParameters, string lpDirectory, int nShowCmd);
 
     // RECT structure for window coordinates
     [StructLayout(LayoutKind.Sequential)]
@@ -123,12 +126,14 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     private bool _allowMouseMovement = true;
     private bool _windowWasClosedSinceLastMovement = true;
     
-    // Fast mode frame-based execution
+    // Fast mode simplified execution
     private bool _fastModePending = false;
     private (int x, int y) _fastModeCoords;
-    private int _fastModeFrameCount = 0;
     private DateTime _fastModeStartTime;
     private int _fastModeClickCount = 0;
+    private bool _fastModeCtrlPressed = false;
+    private bool _fastModeInInitialPhase = true;
+    private DateTime _fastModeLastClickTime = DateTime.MinValue;
     
     // Cached purchase window position for Fast Mode
     private (float x, float y) _cachedPurchaseWindowTopLeft = (0, 0);
@@ -137,11 +142,18 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     // Connection queue system
     private readonly Queue<JewYourItemInstanceSettings> _connectionQueue = new Queue<JewYourItemInstanceSettings>();
     private DateTime _lastConnectionTime = DateTime.MinValue;
-    private const int ConnectionDelayMs = 1500; // 1.5 seconds between connections
+
+    // Auto stash functionality
+    private bool _autoStashInProgress = false;
+    private bool _autoTpPaused = false;
+    private DateTime _autoStashStartTime = DateTime.MinValue;
 
     public override bool Initialise()
     {
         _rateLimiter = new ConservativeRateLimiter(LogMessage, LogError);
+        
+        // Set plugin instance reference in settings for GUI access
+        Settings.GroupsConfig.PluginInstance = this;
         
         // Use secure session ID storage with fallback to regular session ID
         _sessionIdBuffer = Settings.SecureSessionId ?? "";
@@ -278,16 +290,20 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         {
             LogMessage($"⚡ FAST MODE: Area loaded, directly moving cursor and clicking at ({_teleportedItemLocation.Value.x}, {_teleportedItemLocation.Value.y})");
             
-            // Store coordinates for frame-based execution
+            // Store coordinates for simplified execution
             var coords = _teleportedItemLocation.Value;
             _teleportedItemLocation = null; // Clear immediately to prevent double execution
             
-            // Schedule frame-based execution
+            // Initialize simplified fast mode
             _fastModePending = true;
             _fastModeCoords = coords;
-            _fastModeFrameCount = 0;
             _fastModeStartTime = DateTime.Now;
             _fastModeClickCount = 0;
+            _fastModeCtrlPressed = false;
+            _fastModeInInitialPhase = true;
+            _fastModeLastClickTime = DateTime.MinValue;
+            
+            LogMessage($"⚡ FAST MODE INIT: Initial clicks={Settings.FastModeInitialClicks.Value}@{Settings.FastModeInitialDelay.Value}ms, Main clicks={Settings.FastModeMainClicks.Value}@{Settings.FastModeMainDelay.Value}ms");
         }
     }
 
@@ -365,9 +381,8 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                     System.Windows.Forms.Cursor.Position = new System.Drawing.Point(finalX, finalY);
                     LogMessage($"⚡ FAST MODE: Moved cursor to ({finalX}, {finalY})");
                     
-                    // First click immediately
-                    await PerformCtrlLeftClickAsync();
-                    LogMessage("⚡ FAST MODE: Click 1/3 performed");
+                    // First click will be handled by the main fast mode logic
+                    LogMessage("⚡ FAST MODE: Cursor positioned, ready for clicking");
                     return true;
                 }
                 else
@@ -394,9 +409,8 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
                 System.Windows.Forms.Cursor.Position = new System.Drawing.Point(itemX, itemY);
                 LogMessage($"⚡ FAST MODE: Moved cursor to ({itemX}, {itemY})");
                 
-                // First click immediately
-                await PerformCtrlLeftClickAsync();
-                LogMessage("⚡ FAST MODE: Click 1/3 performed");
+                // First click will be handled by the main fast mode logic
+                LogMessage("⚡ FAST MODE: Cursor positioned, ready for clicking");
                 return true;
             }
             else
@@ -522,8 +536,15 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         if (_connectionQueue.Count == 0) return;
 
         // Check if enough time has passed since last connection
-        if ((DateTime.Now - _lastConnectionTime).TotalMilliseconds < ConnectionDelayMs)
+        var timeSinceLastConnection = (DateTime.Now - _lastConnectionTime).TotalMilliseconds;
+        if (timeSinceLastConnection < Settings.SearchQueueDelay.Value)
+        {
+            if (Settings.DebugMode.Value)
+            {
+                LogMessage($"🔍 DEBUG: Search queue delay active - {Settings.SearchQueueDelay.Value - timeSinceLastConnection:F0}ms remaining (last connection: {timeSinceLastConnection:F0}ms ago)");
+            }
             return;
+        }
 
         var config = _connectionQueue.Dequeue();
         _lastConnectionTime = DateTime.Now;
@@ -539,6 +560,12 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
         var newListener = new SearchListener(this, config, LogMessage, LogError);
         _listeners.Add(newListener);
         LogMessage($"🆕 STARTING FROM QUEUE: Search {config.SearchId.Value}");
+        
+        if (Settings.DebugMode.Value)
+        {
+            LogMessage($"🔍 DEBUG: Search queue delay was {Settings.SearchQueueDelay.Value}ms, time since last connection: {timeSinceLastConnection:F0}ms");
+        }
+        
         newListener.Start(LogMessage, LogError, Settings.SecureSessionId);
     }
 
@@ -563,83 +590,115 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             CachePurchaseWindowPosition();
         }
         
-        // FAST MODE: Time-based execution
+        // FAST MODE: Simplified clicking execution
         if (_fastModePending)
         {
-            var elapsed = DateTime.Now - _fastModeStartTime;
-            var tickDelay = Settings.FastModeTickDelay.Value;
+            var now = DateTime.Now;
+            var totalClicks = Settings.FastModeInitialClicks.Value + Settings.FastModeMainClicks.Value;
             
-            LogMessage($"⚡ FAST MODE: Elapsed={elapsed.TotalMilliseconds:F1}ms, TickDelay={tickDelay}ms, ClickCount={_fastModeClickCount}");
+            LogMessage($"⚡ FAST MODE: Click {_fastModeClickCount + 1}/{totalClicks}, Phase={(_fastModeInInitialPhase ? "Initial" : "Main")}, CtrlPressed={_fastModeCtrlPressed}");
             
-            // Try to execute cursor movement and clicks
-            bool executed = false;
-            
-            if (_fastModeClickCount == 0)
+            // Check if we've completed all clicks
+            if (_fastModeClickCount >= totalClicks)
             {
-                // First execution: Move cursor and perform first click immediately
-                LogMessage("⚡ FAST MODE: Starting execution - move cursor and first click");
-                executed = await TryExecuteFastMode();
-                if (executed)
+                LogMessage("⚡ FAST MODE: All clicks completed, stopping");
+                
+                // Release Ctrl key if it's still pressed
+                if (_fastModeCtrlPressed)
                 {
-                    _fastModeClickCount = 1;
+                    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    LogMessage("⚡ FAST MODE: Released Ctrl key");
+                    _fastModeCtrlPressed = false;
                 }
-            }
-            else if (_fastModeClickCount == 1 && elapsed.TotalMilliseconds >= tickDelay)
-            {
-                // Second click: After one tick delay
-                LogMessage("⚡ FAST MODE: Second click");
-                try
-                {
-                    await PerformCtrlLeftClickAsync();
-                    LogMessage("⚡ FAST MODE: Click 2/3 performed");
-                    _fastModeClickCount = 2;
-                    executed = true;
-                }
-                catch (Exception ex)
-                {
-                    LogError($"⚡ FAST MODE ERROR: {ex.Message}");
-                }
-            }
-            else if (_fastModeClickCount == 2 && elapsed.TotalMilliseconds >= (tickDelay * 3))
-            {
-                // Third click: After three tick delays
-                LogMessage("⚡ FAST MODE: Third click");
-                try
-                {
-                    await PerformCtrlLeftClickAsync();
-                    LogMessage("⚡ FAST MODE: Click 3/3 performed");
-                    executed = true;
-                }
-                catch (Exception ex)
-                {
-                    LogError($"⚡ FAST MODE ERROR: {ex.Message}");
-                }
-                finally
-                {
-                    // Reset fast mode state
-                    _fastModePending = false;
-                    _fastModeClickCount = 0;
-                    LogMessage("⚡ FAST MODE: Execution completed, resetting state");
-                }
-            }
-            
-            // Timeout protection: If we've been trying for too long, give up
-            if (!executed && elapsed.TotalMilliseconds > 2000) // 2 second timeout
-            {
-                LogMessage("⚡ FAST MODE: Timeout reached, giving up");
+                
                 _fastModePending = false;
                 _fastModeClickCount = 0;
+                _fastModeInInitialPhase = true;
+                return;
             }
             
-            if (executed)
+            // Determine current delay based on phase
+            int currentDelay = _fastModeInInitialPhase ? Settings.FastModeInitialDelay.Value : Settings.FastModeMainDelay.Value;
+            
+            // Check if it's time for the next click
+            if (_fastModeLastClickTime == DateTime.MinValue || (now - _fastModeLastClickTime).TotalMilliseconds >= currentDelay)
             {
-                return; // Skip the rest of the tick processing
+                try
+                {
+                    // First click: Move cursor and press Ctrl
+                    if (_fastModeClickCount == 0)
+                    {
+                        LogMessage("⚡ FAST MODE: Starting execution - move cursor, press Ctrl, and first click");
+                        
+                        // Press Ctrl key down and keep it pressed
+                        if (!_fastModeCtrlPressed)
+                        {
+                            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+                            _fastModeCtrlPressed = true;
+                            LogMessage("⚡ FAST MODE: Pressed Ctrl key down");
+                            await Task.Delay(10); // Small delay to ensure Ctrl is registered
+                        }
+                        
+                        // Move cursor to position
+                        bool executed = await TryExecuteFastMode();
+                        if (!executed)
+                        {
+                            LogMessage("⚡ FAST MODE: Failed to position cursor, retrying next frame");
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        // Ensure Ctrl is still pressed for subsequent clicks
+                        if (!_fastModeCtrlPressed)
+                        {
+                            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+                            _fastModeCtrlPressed = true;
+                            LogMessage("⚡ FAST MODE: Re-pressed Ctrl key");
+                        }
+                    }
+                    
+                    // Perform click
+                    LogMessage($"⚡ FAST MODE: Click {_fastModeClickCount + 1} (Phase: {(_fastModeInInitialPhase ? "Initial" : "Main")}, Delay: {currentDelay}ms)");
+                    
+                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                    await Task.Delay(10);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                    await Task.Delay(10);
+                    
+                    _fastModeClickCount++;
+                    _fastModeLastClickTime = now;
+                    
+                    // Check if we should switch to main phase
+                    if (_fastModeInInitialPhase && _fastModeClickCount >= Settings.FastModeInitialClicks.Value)
+                    {
+                        _fastModeInInitialPhase = false;
+                        LogMessage($"⚡ FAST MODE: Switching to main phase ({Settings.FastModeMainClicks.Value} clicks @ {Settings.FastModeMainDelay.Value}ms)");
+                    }
+                    
+                    return; // Skip the rest of the tick processing
+                }
+                catch (Exception ex)
+                {
+                    LogError($"⚡ FAST MODE ERROR: {ex.Message}");
+                }
             }
         }
         
         // CRITICAL: IMMEDIATE PLUGIN DISABLE CHECK - HIGHEST PRIORITY
         if (!Settings.Enable.Value)
         {
+            // Release Ctrl key if it's pressed during fast mode
+            if (_fastModeCtrlPressed)
+            {
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                LogMessage("🛑 PLUGIN DISABLED: Released Ctrl key from fast mode");
+                _fastModeCtrlPressed = false;
+                _fastModePending = false;
+                _fastModeClickCount = 0;
+                _fastModeInInitialPhase = true;
+            }
+            
             if (_listeners.Count > 0)
             {
                 LogMessage($"🛑 PLUGIN DISABLED: Stopping {_listeners.Count} active listeners immediately");
@@ -901,6 +960,34 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             TravelToHideout(isManual: true);
         }
         _lastHotkeyState = currentHotkeyState;
+
+        // Check for auto stash if enabled and not already in progress
+        if (Settings.AutoStash.Value && !_autoStashInProgress && !_autoTpPaused)
+        {
+            // Don't run auto stash during loading or if not in game
+            if (GameController.IsLoading || !GameController.InGame)
+            {
+                LogDebug($"🔄 AUTO STASH: Auto stash check skipped - IsLoading: {GameController.IsLoading}, InGame: {GameController.InGame}");
+            }
+            else
+            {
+                LogDebug("🔄 AUTO STASH: Checking inventory fullness for auto stash trigger");
+                if (IsInventoryFullFor2x4Item())
+                {
+                    LogMessage("📦 AUTO STASH: Inventory is full, starting auto stash routine...");
+                    LogDebug("🔄 AUTO STASH: Auto stash triggered - inventory is full");
+                    _ = ExecuteAutoStashRoutine();
+                }
+                else
+                {
+                    LogDebug("🔄 AUTO STASH: Inventory not full - no auto stash needed");
+                }
+            }
+        }
+        else
+        {
+            LogDebug($"🔄 AUTO STASH: Auto stash check skipped - Enabled: {Settings.AutoStash.Value}, InProgress: {_autoStashInProgress}, TpPaused: {_autoTpPaused}");
+        }
 
         // Check if purchase window just became visible and learn coordinates + move mouse to teleported item
         bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
@@ -1333,6 +1420,18 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
     public void OnDisable()
     {
         LogMessage("🛑 ON DISABLE CALLED: Plugin is being disabled by framework");
+        
+        // Release Ctrl key if it's pressed during fast mode
+        if (_fastModeCtrlPressed)
+        {
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            LogMessage("🛑 ON DISABLE: Released Ctrl key from fast mode");
+            _fastModeCtrlPressed = false;
+            _fastModePending = false;
+            _fastModeClickCount = 0;
+            _fastModeInInitialPhase = true;
+        }
+        
         ForceStopAll();
         
         // Additional safety check - ensure all listeners are stopped
@@ -1772,5 +1871,622 @@ public partial class JewYourItem : BaseSettingsPlugin<JewYourItemSettings>
             LogError($"❌ FAILED TO LOG SEARCH RESULT: {ex.Message}");
             LogError($"❌ STACK TRACE: {ex.StackTrace}");
         }
+    }
+
+    /// <summary>
+    /// Opens a trade search URL in the default browser
+    /// </summary>
+    /// <param name="searchId">The search ID to open</param>
+    /// <param name="league">The league name</param>
+    private void OpenSearchInBrowser(string searchId, string league)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(searchId))
+            {
+                LogError("❌ Cannot open search: Search ID is empty");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(league))
+            {
+                league = "Rise of the Abyssal"; // Default league
+            }
+
+            string url = $"https://www.pathofexile.com/trade2/search/poe2/{Uri.EscapeDataString(league)}/{searchId}";
+            LogMessage($"🌐 Opening search in browser: {url}");
+            
+            ShellExecute(IntPtr.Zero, "open", url, null, null, 1);
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ Failed to open search in browser: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Opens all enabled searches in the browser
+    /// </summary>
+    public void OpenAllEnabledSearchesInBrowser()
+    {
+        try
+        {
+            if (Settings?.Groups == null || Settings.Groups.Count == 0)
+            {
+                LogMessage("ℹ️ No search groups configured");
+                return;
+            }
+
+            var enabledSearches = new List<(string searchId, string league, string name)>();
+            
+            foreach (var group in Settings.Groups)
+            {
+                if (!group.Enable.Value) continue;
+
+                foreach (var search in group.Searches)
+                {
+                    if (search.Enable.Value && !string.IsNullOrWhiteSpace(search.SearchId.Value))
+                    {
+                        enabledSearches.Add((search.SearchId.Value, search.League.Value, search.Name.Value));
+                    }
+                }
+            }
+
+            if (enabledSearches.Count == 0)
+            {
+                LogMessage("ℹ️ No enabled searches found");
+                return;
+            }
+
+            LogMessage($"🌐 Opening {enabledSearches.Count} enabled searches in browser...");
+            
+            foreach (var (searchId, league, name) in enabledSearches)
+            {
+                LogMessage($"  → Opening: {name} ({searchId})");
+                OpenSearchInBrowser(searchId, league);
+                
+                // Add configurable delay between opening tabs to prevent overwhelming the browser
+                int delayMs = Settings.BrowserTabDelay.Value * 1000; // Convert seconds to milliseconds
+                LogMessage($"  ⏳ Waiting {Settings.BrowserTabDelay.Value} seconds before opening next tab...");
+                System.Threading.Thread.Sleep(delayMs);
+            }
+
+            LogMessage($"✅ Successfully opened {enabledSearches.Count} searches in browser");
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ Failed to open enabled searches: {ex.Message}");
+        }
+    }
+
+
+    /// <summary>
+    /// Execute the complete auto stash routine
+    /// </summary>
+    private async Task ExecuteAutoStashRoutine()
+    {
+        try
+        {
+            _autoStashInProgress = true;
+            _autoStashStartTime = DateTime.Now;
+
+            LogMessage("🔄 AUTO STASH: Starting auto stash routine...");
+
+            // Add overall timeout (5 minutes)
+            var timeoutTask = Task.Delay(300000); // 5 minutes
+            var stashTask = ExecuteAutoStashSteps();
+            
+            var completedTask = await Task.WhenAny(stashTask, timeoutTask);
+            
+            if (completedTask == timeoutTask)
+            {
+                LogMessage("⏰ AUTO STASH: Process timed out after 5 minutes");
+                return;
+            }
+
+            await stashTask; // Get any exceptions from the actual task
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ AUTO STASH ERROR: {ex.Message}");
+        }
+        finally
+        {
+            // Step 7: Resume auto TP
+            _autoTpPaused = false;
+            _autoStashInProgress = false;
+            LogMessage("▶️ AUTO STASH: Resumed auto teleporting");
+        }
+    }
+
+    /// <summary>
+    /// Execute the individual steps of the auto stash routine
+    /// </summary>
+    private async Task ExecuteAutoStashSteps()
+    {
+        LogDebug("🔄 AUTO STASH: Starting ExecuteAutoStashSteps");
+        
+        // Pre-check: Ensure we're not in a loading state
+        if (GameController.IsLoading || !GameController.InGame)
+        {
+            LogMessage("❌ AUTO STASH: Cannot proceed - game is loading or not in game");
+            LogDebug($"🔄 AUTO STASH: Pre-check failed - IsLoading: {GameController.IsLoading}, InGame: {GameController.InGame}");
+            return;
+        }
+        
+        // Step 1: Check if inventory is full (2x4 space check)
+        LogDebug("🔄 AUTO STASH: Step 1 - Checking inventory fullness");
+        if (!IsInventoryFullFor2x4Item())
+        {
+            LogMessage("📦 AUTO STASH: Inventory has space for 2x4 item, no stashing needed");
+            LogDebug("🔄 AUTO STASH: Inventory check complete - not full, exiting");
+            return;
+        }
+
+        LogMessage("📦 AUTO STASH: Inventory is full (no 2x4 space), proceeding with stash routine...");
+        LogDebug("🔄 AUTO STASH: Inventory check complete - full, continuing with stash routine");
+
+        // Step 2: Pause auto TP
+        LogDebug("🔄 AUTO STASH: Step 2 - Pausing auto teleporting");
+        _autoTpPaused = true;
+        LogMessage("⏸️ AUTO STASH: Paused auto teleporting");
+        LogDebug("🔄 AUTO STASH: Auto TP paused successfully");
+
+        // Step 3: Go to hideout
+        LogDebug("🔄 AUTO STASH: Step 3 - Teleporting to hideout");
+        LogMessage("🏠 AUTO STASH: Teleporting to hideout...");
+        await TravelToHideoutForStash();
+        LogDebug("🔄 AUTO STASH: Hideout teleportation complete");
+
+        // Post-travel check: Ensure we're still in a valid state
+        if (GameController.IsLoading || !GameController.InGame)
+        {
+            LogMessage("❌ AUTO STASH: Game entered loading state after travel, aborting");
+            LogDebug($"🔄 AUTO STASH: Post-travel check failed - IsLoading: {GameController.IsLoading}, InGame: {GameController.InGame}");
+            return;
+        }
+
+        // Step 4: Find and click stash
+        LogDebug("🔄 AUTO STASH: Step 4 - Finding and clicking stash");
+        LogMessage("🔍 AUTO STASH: Looking for stash...");
+        if (!await FindAndClickStash())
+        {
+            LogMessage("❌ AUTO STASH: Failed to find or click stash");
+            LogDebug("🔄 AUTO STASH: Stash finding failed, exiting");
+            return;
+        }
+        LogDebug("🔄 AUTO STASH: Stash found and clicked successfully");
+
+        // Step 5: Wait for stash to open
+        LogDebug("🔄 AUTO STASH: Step 5 - Waiting for stash to open");
+        LogMessage("⏳ AUTO STASH: Waiting for stash to open...");
+        if (!await WaitForStashToOpen())
+        {
+            LogMessage("❌ AUTO STASH: Stash failed to open");
+            LogDebug("🔄 AUTO STASH: Stash opening failed, exiting");
+            return;
+        }
+        LogDebug("🔄 AUTO STASH: Stash opened successfully");
+
+        // Step 6: Dump items to stash
+        LogDebug("🔄 AUTO STASH: Step 6 - Dumping items to stash");
+        LogMessage("📦 AUTO STASH: Dumping items to stash...");
+        await DumpItemsToStash();
+        LogDebug("🔄 AUTO STASH: Item dumping complete");
+
+        LogMessage("✅ AUTO STASH: Auto stash routine completed successfully!");
+        LogDebug("🔄 AUTO STASH: ExecuteAutoStashSteps completed successfully");
+    }
+
+    /// <summary>
+    /// Check if inventory is full (specifically checking for 2x4 item space)
+    /// </summary>
+    private bool IsInventoryFullFor2x4Item()
+    {
+        try
+        {
+            LogDebug("🔄 AUTO STASH: Starting inventory fullness check");
+            var inventoryItems = GameController.IngameState.ServerData.PlayerInventories[0].Inventory.InventorySlotItems;
+            LogDebug($"🔄 AUTO STASH: Found {inventoryItems.Count} inventory items");
+            
+            // Track each inventory slot (12x5 grid)
+            bool[,] inventorySlot = new bool[12, 5];
+
+            // Mark used slots
+            foreach (var inventoryItem in inventoryItems)
+            {
+                int x = inventoryItem.PosX;
+                int y = inventoryItem.PosY;
+                int height = inventoryItem.SizeY;
+                int width = inventoryItem.SizeX;
+                
+                LogDebug($"🔄 AUTO STASH: Processing item at ({x},{y}) size {width}x{height}");
+                
+                for (int row = x; row < x + width; row++)
+                {
+                    for (int col = y; col < y + height; col++)
+                    {
+                        if (row >= 0 && row < 12 && col >= 0 && col < 5)
+                        {
+                            inventorySlot[row, col] = true;
+                        }
+                    }
+                }
+            }
+
+            LogDebug("🔄 AUTO STASH: Marked used slots, checking for 2x4 space");
+
+            // Check if there's space for a 2x4 item
+            for (int x = 0; x <= 12 - 2; x++) // 2 width
+            {
+                for (int y = 0; y <= 5 - 4; y++) // 4 height
+                {
+                    bool canFit = true;
+                    for (int checkX = x; checkX < x + 2; checkX++)
+                    {
+                        for (int checkY = y; checkY < y + 4; checkY++)
+                        {
+                            if (inventorySlot[checkX, checkY])
+                            {
+                                canFit = false;
+                                break;
+                            }
+                        }
+                        if (!canFit) break;
+                    }
+                    
+                    if (canFit)
+                    {
+                        LogMessage($"📦 AUTO STASH: Found 2x4 space at ({x}, {y}) - inventory not full");
+                        LogDebug($"🔄 AUTO STASH: Inventory check result - NOT FULL (space found at {x},{y})");
+                        return false;
+                    }
+                }
+            }
+
+            LogMessage("📦 AUTO STASH: No 2x4 space found - inventory is full");
+            LogDebug("🔄 AUTO STASH: Inventory check result - FULL (no 2x4 space found)");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ AUTO STASH: Error checking inventory fullness: {ex.Message}");
+            LogDebug($"🔄 AUTO STASH: Inventory check failed with exception: {ex}");
+            return false; // Assume not full if we can't check
+        }
+    }
+
+    /// <summary>
+    /// Travel to hideout for stash operation
+    /// </summary>
+    private async Task TravelToHideoutForStash()
+    {
+        try
+        {
+            LogDebug("🔄 AUTO STASH: Starting hideout travel");
+            LogDebug($"🔄 AUTO STASH: Current area before travel: {GameController?.Area?.CurrentArea?.Name ?? "null"}");
+            
+            // Press Enter to open chat
+            LogDebug("🔄 AUTO STASH: Pressing Enter to open chat");
+            keybd_event(0x0D, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero); // Enter key down
+            await Task.Delay(50);
+            keybd_event(0x0D, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); // Enter key up
+            await Task.Delay(100);
+
+            // Type /hideout command
+            string hideoutCommand = "/hideout";
+            LogDebug($"🔄 AUTO STASH: Typing hideout command: {hideoutCommand}");
+            foreach (char c in hideoutCommand)
+            {
+                // Use SendKeys for more reliable text input
+                System.Windows.Forms.SendKeys.SendWait(c.ToString());
+                await Task.Delay(50);
+            }
+
+            // Press Enter to execute command
+            LogDebug("🔄 AUTO STASH: Pressing Enter to execute hideout command");
+            keybd_event(0x0D, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+            await Task.Delay(50);
+            keybd_event(0x0D, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+
+            LogMessage("🏠 AUTO STASH: Sent /hideout command, waiting for area load...");
+            LogDebug("🔄 AUTO STASH: Hideout command sent, waiting for area load");
+
+            // Wait for area change (loading screen)
+            await WaitForAreaLoad();
+            LogDebug("🔄 AUTO STASH: Hideout travel completed");
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ AUTO STASH: Error traveling to hideout: {ex.Message}");
+            LogDebug($"🔄 AUTO STASH: Hideout travel failed with exception: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// Wait for area to finish loading
+    /// </summary>
+    private async Task WaitForAreaLoad()
+    {
+        int maxWaitTime = 30000; // 30 seconds max
+        int waitTime = 0;
+        string initialArea = GameController?.Area?.CurrentArea?.Name ?? "unknown";
+        
+        LogDebug($"🔄 AUTO STASH: Starting area load wait (max {maxWaitTime}ms)");
+        LogDebug($"🔄 AUTO STASH: Initial area: {initialArea}");
+        
+        // Wait for any loading to complete first
+        while (waitTime < maxWaitTime)
+        {
+            bool isLoading = GameController.IsLoading;
+            LogDebug($"🔄 AUTO STASH: Loading check - IsLoading: {isLoading}, WaitTime: {waitTime}ms");
+            
+            if (isLoading)
+            {
+                LogMessage("⏳ AUTO STASH: Still loading...");
+                await Task.Delay(500);
+                waitTime += 500;
+            }
+            else
+            {
+                LogDebug($"🔄 AUTO STASH: Loading completed after {waitTime}ms");
+                break;
+            }
+        }
+        
+        // Now wait for area to stabilize (not loading AND not in transition state)
+        waitTime = 0;
+        while (waitTime < maxWaitTime)
+        {
+            bool isLoading = GameController.IsLoading;
+            bool inGame = GameController.InGame;
+            string currentArea = GameController?.Area?.CurrentArea?.Name ?? "unknown";
+            
+            LogDebug($"🔄 AUTO STASH: Area stability check - IsLoading: {isLoading}, InGame: {inGame}, Area: {currentArea}, WaitTime: {waitTime}ms");
+            
+            if (isLoading || !inGame)
+            {
+                LogMessage("⏳ AUTO STASH: Still loading or not in game...");
+                await Task.Delay(500);
+                waitTime += 500;
+            }
+            else
+            {
+                // Additional check: make sure we're actually in a hideout area
+                if (currentArea.ToLower().Contains("hideout"))
+                {
+                    LogMessage("✅ AUTO STASH: Area loaded successfully");
+                    LogDebug($"🔄 AUTO STASH: Area load completed after {waitTime}ms");
+                    await Task.Delay(2000); // Give it extra time to fully load
+                    LogDebug($"🔄 AUTO STASH: Final area after load: {currentArea}");
+                    return;
+                }
+                else
+                {
+                    LogDebug($"🔄 AUTO STASH: Not in hideout yet (current: {currentArea}), waiting...");
+                    await Task.Delay(500);
+                    waitTime += 500;
+                }
+            }
+        }
+        
+        LogMessage("⚠️ AUTO STASH: Area load timeout, continuing anyway...");
+        LogDebug($"🔄 AUTO STASH: Area load timed out after {waitTime}ms");
+    }
+
+    /// <summary>
+    /// Find and click the stash
+    /// </summary>
+    private async Task<bool> FindAndClickStash()
+    {
+        try
+        {
+            LogDebug("🔄 AUTO STASH: Starting stash finding process");
+            
+            // Try multiple times to find the stash
+            for (int attempt = 1; attempt <= 5; attempt++)
+            {
+                LogMessage($"🔍 AUTO STASH: Looking for stash (attempt {attempt}/5)...");
+                LogDebug($"🔄 AUTO STASH: Stash search attempt {attempt}/5");
+                
+                var itemsOnGround = GameController.IngameState.IngameUi.ItemsOnGroundLabels;
+                
+                if (itemsOnGround == null)
+                {
+                    LogMessage($"❌ AUTO STASH: ItemsOnGroundLabels is null (attempt {attempt})");
+                    LogDebug($"🔄 AUTO STASH: ItemsOnGroundLabels is null on attempt {attempt}");
+                    await Task.Delay(1000);
+                    continue;
+                }
+
+                LogDebug($"🔄 AUTO STASH: Found {itemsOnGround.Count()} items on ground labels");
+                
+                int stashFound = 0;
+                foreach (var label in itemsOnGround)
+                {
+                    LogDebug($"🔄 AUTO STASH: Checking label: '{label?.Label?.Text ?? "null"}'");
+                    
+                    if (label?.Label?.Text == "Stash")
+                    {
+                        stashFound++;
+                        var position = label.Label.GetClientRect().Center;
+                        LogMessage($"🎯 AUTO STASH: Found stash at position {position}");
+                        LogDebug($"🔄 AUTO STASH: Stash found at position ({position.X}, {position.Y})");
+                        
+                        // Click on the stash
+                        LogDebug("🔄 AUTO STASH: Moving cursor to stash position");
+                        System.Windows.Forms.Cursor.Position = new System.Drawing.Point((int)position.X, (int)position.Y);
+                        await Task.Delay(100);
+                        
+                        LogDebug("🔄 AUTO STASH: Clicking on stash");
+                        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                        await Task.Delay(50);
+                        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                        
+                        LogMessage("🖱️ AUTO STASH: Clicked on stash");
+                        LogDebug("🔄 AUTO STASH: Stash click completed successfully");
+                        return true;
+                    }
+                }
+
+                LogMessage($"❌ AUTO STASH: Stash not found in ItemsOnGroundLabels (attempt {attempt})");
+                LogDebug($"🔄 AUTO STASH: No stash found in {itemsOnGround.Count()} labels on attempt {attempt}");
+                await Task.Delay(1000);
+            }
+
+            LogMessage("❌ AUTO STASH: Stash not found after 5 attempts");
+            LogDebug("🔄 AUTO STASH: Stash finding failed after all attempts");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ AUTO STASH: Error finding/clicking stash: {ex.Message}");
+            LogDebug($"🔄 AUTO STASH: Stash finding failed with exception: {ex}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Wait for stash to open
+    /// </summary>
+    private async Task<bool> WaitForStashToOpen()
+    {
+        int maxWaitTime = 10000; // 10 seconds max
+        int waitTime = 0;
+        
+        LogDebug($"🔄 AUTO STASH: Starting stash open wait (max {maxWaitTime}ms)");
+        
+        while (waitTime < maxWaitTime)
+        {
+            bool isVisible = GameController.IngameState.IngameUi.StashElement.IsVisible;
+            LogDebug($"🔄 AUTO STASH: Stash visibility check - IsVisible: {isVisible}, WaitTime: {waitTime}ms");
+            
+            if (isVisible)
+            {
+                LogMessage("✅ AUTO STASH: Stash opened successfully");
+                LogDebug($"🔄 AUTO STASH: Stash opened after {waitTime}ms");
+                return true;
+            }
+            
+            await Task.Delay(200);
+            waitTime += 200;
+        }
+        
+        LogMessage("❌ AUTO STASH: Stash failed to open within timeout");
+        LogDebug($"🔄 AUTO STASH: Stash open timed out after {waitTime}ms");
+        return false;
+    }
+
+    /// <summary>
+    /// Dump items from inventory to stash using HighlightedItems logic
+    /// </summary>
+    private async Task DumpItemsToStash()
+    {
+        try
+        {
+            LogDebug("🔄 AUTO STASH: Starting item dump process");
+            
+            var inventoryItems = GameController.IngameState.ServerData.PlayerInventories[0].Inventory.InventorySlotItems
+                .Where(x => !IsInIgnoreCell(x))
+                .OrderBy(x => x.PosX)
+                .ThenBy(x => x.PosY)
+                .ToList();
+
+            LogMessage($"📦 AUTO STASH: Found {inventoryItems.Count} items to move to stash");
+            LogDebug($"🔄 AUTO STASH: Processing {inventoryItems.Count} items for stash dump");
+
+            int itemsProcessed = 0;
+            foreach (var item in inventoryItems)
+            {
+                itemsProcessed++;
+                LogDebug($"🔄 AUTO STASH: Processing item {itemsProcessed}/{inventoryItems.Count} at position ({item.PosX},{item.PosY})");
+                
+                if (!GameController.IngameState.IngameUi.InventoryPanel.IsVisible)
+                {
+                    LogMessage("❌ AUTO STASH: Inventory panel closed, stopping item dump");
+                    LogDebug($"🔄 AUTO STASH: Inventory panel closed, stopping at item {itemsProcessed}");
+                    break;
+                }
+
+                if (!GameController.IngameState.IngameUi.StashElement.IsVisible)
+                {
+                    LogMessage("❌ AUTO STASH: Stash closed, stopping item dump");
+                    LogDebug($"🔄 AUTO STASH: Stash closed, stopping at item {itemsProcessed}");
+                    break;
+                }
+
+                await MoveItemToStash(item);
+                await Task.Delay(100); // Small delay between items
+                LogDebug($"🔄 AUTO STASH: Item {itemsProcessed} moved successfully");
+            }
+
+            LogMessage("✅ AUTO STASH: Item dump completed");
+            LogDebug($"🔄 AUTO STASH: Item dump completed - processed {itemsProcessed} items");
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ AUTO STASH: Error dumping items: {ex.Message}");
+            LogDebug($"🔄 AUTO STASH: Item dump failed with exception: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// Move a single item to stash
+    /// </summary>
+    private async Task MoveItemToStash(ServerInventory.InventSlotItem item)
+    {
+        try
+        {
+            var itemRect = item.GetClientRect();
+            var itemPosition = itemRect.Center;
+
+            LogDebug($"🔄 AUTO STASH: Moving item at position ({item.PosX},{item.PosY}) to center ({itemPosition.X},{itemPosition.Y})");
+
+            // Press Ctrl key
+            LogDebug("🔄 AUTO STASH: Pressing Ctrl key");
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+            await Task.Delay(10);
+
+            // Move mouse to item
+            LogDebug("🔄 AUTO STASH: Moving cursor to item position");
+            System.Windows.Forms.Cursor.Position = new System.Drawing.Point((int)itemPosition.X, (int)itemPosition.Y);
+            await Task.Delay(20);
+
+            // Click and drag
+            LogDebug("🔄 AUTO STASH: Performing Ctrl+Click on item");
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+            await Task.Delay(5);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+            await Task.Delay(5);
+
+            // Release Ctrl key
+            LogDebug("🔄 AUTO STASH: Releasing Ctrl key");
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            
+            LogDebug("🔄 AUTO STASH: Item move completed successfully");
+        }
+        catch (Exception ex)
+        {
+            LogError($"❌ AUTO STASH: Error moving item: {ex.Message}");
+            LogDebug($"🔄 AUTO STASH: Item move failed with exception: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// Check if item is in ignore cell (copied from HighlightedItems logic)
+    /// </summary>
+    private bool IsInIgnoreCell(ServerInventory.InventSlotItem inventItem)
+    {
+        var inventPosX = inventItem.PosX;
+        var inventPosY = inventItem.PosY;
+
+        if (inventPosX < 0 || inventPosX >= 12)
+            return true;
+        if (inventPosY < 0 || inventPosY >= 5)
+            return true;
+
+        // For now, we don't have ignore cells configured, so return false
+        // This can be extended later if needed
+        return false;
     }
 }

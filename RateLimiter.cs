@@ -356,6 +356,20 @@ public class ConservativeRateLimiter
         if (delay > 0)
         {
             _logMessage($"🛡️ CONSERVATIVE RATE LIMITING: {scope} - waiting {delay}ms for safety...");
+            
+            // DEBUG: Log detailed delay information
+            lock (_lock)
+            {
+                if (_rateLimits.ContainsKey(scope))
+                {
+                    var state = _rateLimits[scope];
+                    var safeUsagePercentage = (double)state.Hits / state.SafeMax;
+                    var actualUsagePercentage = (double)state.Hits / state.Max;
+                    _logMessage($"🔍 DEBUG: Delay reason - Safe usage: {safeUsagePercentage:P1} ({state.Hits}/{state.SafeMax}), Actual usage: {actualUsagePercentage:P1} ({state.Hits}/{state.Max})");
+                    _logMessage($"🔍 DEBUG: Burst count: {state.BurstCount}, Consecutive high usage: {state.ConsecutiveHighUsage}");
+                }
+            }
+            
             await Task.Delay(delay);
         }
         return true;
@@ -365,26 +379,39 @@ public class ConservativeRateLimiter
     {
         if (response.StatusCode == HttpStatusCode.TooManyRequests)
         {
+            _logMessage($"🚨 RATE LIMITED! Status: {response.StatusCode}, Reason: {response.ReasonPhrase}");
+            _logMessage($"🔍 DEBUG: Rate limit response headers: {string.Join(", ", response.Headers.Select(h => $"{h.Key}={string.Join(";", h.Value)}"))}");
+            
             // Parse Retry-After header
             if (response.Headers.TryGetValues("Retry-After", out var retryAfterHeader))
             {
+                var retryAfterValue = string.Join(",", retryAfterHeader);
+                _logMessage($"🔍 DEBUG: Retry-After header found: {retryAfterValue}");
+                
                 if (int.TryParse(retryAfterHeader.First(), out var retryAfterSeconds))
                 {
                     var waitTime = retryAfterSeconds * 1000;
                     _logMessage($"🚨 RATE LIMITED! Waiting {retryAfterSeconds} seconds before retry...");
+                    _logMessage($"🔍 DEBUG: Rate limit wait time: {waitTime}ms");
                     await Task.Delay(waitTime);
                     return waitTime;
+                }
+                else
+                {
+                    _logMessage($"🔍 DEBUG: Failed to parse Retry-After value: {retryAfterValue}");
                 }
             }
             else
             {
                 _logMessage("🚨 RATE LIMITED! No Retry-After header, waiting 60 seconds...");
+                _logMessage("🔍 DEBUG: No Retry-After header found, using fallback 60-second delay");
                 await Task.Delay(60000);
                 return 60000;
             }
         }
 
         // Parse rate limit headers for future requests
+        _logMessage($"🔍 DEBUG: Parsing rate limit headers from response {response.StatusCode}");
         ParseRateLimitHeaders(response);
         return 0;
     }
@@ -420,6 +447,7 @@ public class ConservativeRateLimiter
             {
                 state.ConsecutiveHighUsage++;
                 _logMessage($"🚨 EMERGENCY BRAKE: {scope} at {emergencyUsagePercentage:P1} of emergency threshold! Waiting 15 seconds...");
+                _logMessage($"🔍 DEBUG: Emergency brake triggered - Emergency threshold: {state.EmergencyThreshold}, Current hits: {state.Hits}, Max: {state.Max}");
                 return 15000; // 15 seconds emergency brake
             }
 
@@ -427,6 +455,7 @@ public class ConservativeRateLimiter
             if (state.BurstCount > 2) // More conservative than before
             {
                 _logMessage($"⚠️ BURST PROTECTION: {scope} made {state.BurstCount} requests in 1 second. Waiting 5 seconds...");
+                _logMessage($"🔍 DEBUG: Burst protection triggered - Last request time: {state.LastRequestTime:HH:mm:ss.fff}, Current time: {now:HH:mm:ss.fff}");
                 return 5000; // 5 seconds burst protection
             }
 
@@ -434,21 +463,25 @@ public class ConservativeRateLimiter
             if (safeUsagePercentage >= 0.7) // 70% of our 50% = 35% of actual limit
             {
                 state.ConsecutiveHighUsage++;
+                _logMessage($"🔍 DEBUG: Conservative delay 8s - Safe usage {safeUsagePercentage:P1} >= 70% (35% of actual limit)");
                 return 8000; // 8 seconds if at 35% of actual limit
             }
             else if (safeUsagePercentage >= 0.5) // 50% of our 50% = 25% of actual limit
             {
                 state.ConsecutiveHighUsage++;
+                _logMessage($"🔍 DEBUG: Conservative delay 5s - Safe usage {safeUsagePercentage:P1} >= 50% (25% of actual limit)");
                 return 5000; // 5 seconds if at 25% of actual limit
             }
             else if (safeUsagePercentage >= 0.3) // 30% of our 50% = 15% of actual limit
             {
                 state.ConsecutiveHighUsage++;
+                _logMessage($"🔍 DEBUG: Conservative delay 3s - Safe usage {safeUsagePercentage:P1} >= 30% (15% of actual limit)");
                 return 3000; // 3 seconds if at 15% of actual limit
             }
             else if (safeUsagePercentage >= 0.1) // 10% of our 50% = 5% of actual limit
             {
                 state.ConsecutiveHighUsage = 0; // Reset consecutive high usage
+                _logMessage($"🔍 DEBUG: Conservative delay 1.5s - Safe usage {safeUsagePercentage:P1} >= 10% (5% of actual limit)");
                 return 1500; // 1.5 seconds if at 5% of actual limit
             }
             
@@ -456,6 +489,7 @@ public class ConservativeRateLimiter
             state.ConsecutiveHighUsage = 0;
             
             // MINIMUM DELAY: Always have a delay to be safe
+            _logMessage($"🔍 DEBUG: Minimum delay 1s - Safe usage {safeUsagePercentage:P1} < 10% (5% of actual limit)");
             return 1000; // 1 second minimum delay
         }
     }

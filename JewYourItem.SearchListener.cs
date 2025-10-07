@@ -418,14 +418,51 @@ public partial class JewYourItem
 
                         logMessage($"📦 PROCESSING {wsResponse.New.Length} items in {itemBatches.Count} batches (max {maxItemsPerBatch} per batch)");
 
+                        // DEBUG: Log detailed batch information if debug mode is enabled
+                        if (_parent.Settings.DebugMode.Value)
+                        {
+                            _parent.LogMessage($"🔍 DEBUG: Batch processing started at {DateTime.Now:HH:mm:ss.fff}");
+                            _parent.LogMessage($"🔍 DEBUG: Total items: {wsResponse.New.Length}, Batches: {itemBatches.Count}");
+                            for (int i = 0; i < itemBatches.Count; i++)
+                            {
+                                _parent.LogMessage($"🔍 DEBUG: Batch {i + 1}: {itemBatches[i].Length} items [{string.Join(", ", itemBatches[i])}]");
+                            }
+                            
+                            // Log current rate limiter state before processing
+                            if (_parent._rateLimiter != null)
+                            {
+                                _parent.LogMessage("🔍 DEBUG: Rate limiter state before batch processing:");
+                                _parent._rateLimiter.LogCurrentState();
+                            }
+                        }
+
                         // Process each batch separately
+                        int batchNumber = 0;
+                        DateTime batchProcessingStartTime = DateTime.Now;
                         foreach (var batch in itemBatches)
                         {
+                            batchNumber++;
+                            DateTime batchStartTime = DateTime.Now;
+                            
+                            // DEBUG: Log batch timing and rate limiter state
+                            if (_parent.Settings.DebugMode.Value)
+                            {
+                                _parent.LogMessage($"🔍 DEBUG: Starting batch {batchNumber}/{itemBatches.Count} at {batchStartTime:HH:mm:ss.fff}");
+                                _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} items: [{string.Join(", ", batch)}]");
+                                
+                                // Check rate limiter state before each batch
+                                if (_parent._rateLimiter != null)
+                                {
+                                    _parent.LogMessage($"🔍 DEBUG: Rate limiter state before batch {batchNumber}:");
+                                    _parent._rateLimiter.LogCurrentState();
+                                }
+                            }
+
                             // REMOVED: Rate limiting for batch requests to make auto TP instant
                             string ids = string.Join(",", batch);
                             string fetchUrl = $"https://www.pathofexile.com/api/trade2/fetch/{ids}?query={Config.SearchId.Value}&realm=poe2";
 
-                            logMessage($"🔍 FETCHING batch of {batch.Length} items: {ids}");
+                            logMessage($"🔍 FETCHING batch {batchNumber} of {batch.Length} items: {ids}");
 
                             using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
                             {
@@ -451,15 +488,45 @@ public partial class JewYourItem
                                 request.Headers.Add("Sec-Fetch-Site", "same-origin");
                                 request.Headers.Add("X-Requested-With", "XMLHttpRequest");
 
+                                DateTime requestStartTime = DateTime.Now;
                                 using (var response = await _httpClient.SendAsync(request))
                                 {
+                                    DateTime responseTime = DateTime.Now;
+                                    var requestDuration = responseTime - requestStartTime;
+                                    
+                                    // DEBUG: Log request timing and response details
+                                    if (_parent.Settings.DebugMode.Value)
+                                    {
+                                        _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} HTTP request completed at {responseTime:HH:mm:ss.fff}");
+                                        _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} request duration: {requestDuration.TotalMilliseconds:F0}ms");
+                                        _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} response status: {response.StatusCode}");
+                                        _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} response headers: {string.Join(", ", response.Headers.Select(h => $"{h.Key}={string.Join(";", h.Value)}"))}");
+                                    }
+
                                     // Handle rate limiting
                                     if (_parent._rateLimiter != null)
                                     {
+                                        // DEBUG: Log rate limiter state before handling response
+                                        if (_parent.Settings.DebugMode.Value)
+                                        {
+                                            _parent.LogMessage($"🔍 DEBUG: Handling rate limit response for batch {batchNumber}");
+                                        }
+                                        
                                         var rateLimitWaitTime = await _parent._rateLimiter.HandleRateLimitResponse(response);
                                         if (rateLimitWaitTime > 0)
                                         {
+                                            if (_parent.Settings.DebugMode.Value)
+                                            {
+                                                _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} RATE LIMITED! Wait time: {rateLimitWaitTime}ms, stopping batch processing");
+                                            }
                                             return; // Rate limited, wait and return
+                                        }
+                                        
+                                        // DEBUG: Log rate limiter state after handling response
+                                        if (_parent.Settings.DebugMode.Value)
+                                        {
+                                            _parent.LogMessage($"🔍 DEBUG: Rate limiter state after batch {batchNumber} response:");
+                                            _parent._rateLimiter.LogCurrentState();
                                         }
                                     }
 
@@ -469,7 +536,14 @@ public partial class JewYourItem
                                         var itemResponse = JsonConvert.DeserializeObject<ItemFetchResponse>(content);
                                         if (itemResponse.Result != null && itemResponse.Result.Any())
                                         {
-                                            logMessage($"✅ BATCH SUCCESS: Received {itemResponse.Result.Length} items from batch");
+                                            logMessage($"✅ BATCH {batchNumber} SUCCESS: Received {itemResponse.Result.Length} items from batch");
+                                            
+                                            // DEBUG: Log detailed success information
+                                            if (_parent.Settings.DebugMode.Value)
+                                            {
+                                                _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} processed {itemResponse.Result.Length} items successfully");
+                                                _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} items: {string.Join(", ", itemResponse.Result.Select(r => r.Item.Name ?? r.Item.TypeLine))}");
+                                            }
                                             foreach (var item in itemResponse.Result)
                                             {
                                                 string name = item.Item.Name;
@@ -577,7 +651,7 @@ public partial class JewYourItem
                                                         LastErrorTime = DateTime.Now;
                                                     }
                                                 }
-                                                if (_parent.Settings.AutoTp.Value && _parent.GameController.Area.CurrentArea.IsHideout)
+                                                if (_parent.Settings.AutoTp.Value && _parent.GameController.Area.CurrentArea.IsHideout && !_parent._autoTpPaused)
                                                 {
                                                     // Check if TP is locked and if timeout has expired
                                                     if (_parent._tpLocked && (DateTime.Now - _parent._tpLockedTime).TotalSeconds >= 10)
@@ -605,12 +679,27 @@ public partial class JewYourItem
                                         }
                                         else
                                         {
-                                            logMessage($"⚠️ BATCH EMPTY: No items returned from batch");
+                                            logMessage($"⚠️ BATCH {batchNumber} EMPTY: No items returned from batch");
+                                            
+                                            // DEBUG: Log empty batch details
+                                            if (_parent.Settings.DebugMode.Value)
+                                            {
+                                                _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} returned empty result");
+                                            }
                                         }
                                     }
                                     else
                                     {
                                         string errorMessage = await response.Content.ReadAsStringAsync();
+                                        
+                                        // DEBUG: Log detailed error information
+                                        if (_parent.Settings.DebugMode.Value)
+                                        {
+                                            _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} failed with status {response.StatusCode}");
+                                            _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} error message: {errorMessage}");
+                                            _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} is benign transient error: {IsBenignTransientError(errorMessage)}");
+                                        }
+                                        
                                         if (!IsBenignTransientError(errorMessage))
                                         {
                                             LastErrorTime = DateTime.Now;
@@ -618,11 +707,11 @@ public partial class JewYourItem
                                         // Rate limiting is now handled above
                                         if (response.StatusCode == System.Net.HttpStatusCode.NotFound && errorMessage.Contains("Resource not found; Item no longer available"))
                                         {
-                                            logMessage($"⚠️ BATCH WARNING: Items unavailable in batch: {errorMessage}");
+                                            logMessage($"⚠️ BATCH {batchNumber} WARNING: Items unavailable in batch: {errorMessage}");
                                         }
                                         else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest && errorMessage.Contains("Invalid query"))
                                         {
-                                            logMessage($"⚠️ BATCH WARNING: Invalid query for batch: {errorMessage}");
+                                            logMessage($"⚠️ BATCH {batchNumber} WARNING: Invalid query for batch: {errorMessage}");
                                             if (_parent._recentItems.Count > 0)
                                             {
                                                 _parent._recentItems.Dequeue();
@@ -630,13 +719,47 @@ public partial class JewYourItem
                                         }
                                         else
                                         {
-                                            logError($"❌ BATCH FAILED: {response.StatusCode} - {errorMessage}");
+                                            logError($"❌ BATCH {batchNumber} FAILED: {response.StatusCode} - {errorMessage}");
+                                            
+                                            // DEBUG: Log that we're stopping batch processing
+                                            if (_parent.Settings.DebugMode.Value)
+                                            {
+                                                _parent.LogMessage($"🔍 DEBUG: Stopping batch processing due to serious error in batch {batchNumber}");
+                                            }
                                             break; // Stop processing remaining batches on serious error
                                         }
                                     }
                                 } // End of using (var response = await _httpClient.SendAsync(request))
                             } // End of using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
+                            
+                            // DEBUG: Log batch completion timing
+                            if (_parent.Settings.DebugMode.Value)
+                            {
+                                DateTime batchEndTime = DateTime.Now;
+                                var batchDuration = batchEndTime - batchStartTime;
+                                var totalDuration = batchEndTime - batchProcessingStartTime;
+                                _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} completed at {batchEndTime:HH:mm:ss.fff}");
+                                _parent.LogMessage($"🔍 DEBUG: Batch {batchNumber} duration: {batchDuration.TotalMilliseconds:F0}ms");
+                                _parent.LogMessage($"🔍 DEBUG: Total processing time so far: {totalDuration.TotalMilliseconds:F0}ms");
+                                
+                                // Log rate limiter state after batch completion
+                                if (_parent._rateLimiter != null)
+                                {
+                                    _parent.LogMessage($"🔍 DEBUG: Rate limiter state after batch {batchNumber} completion:");
+                                    _parent._rateLimiter.LogCurrentState();
+                                }
+                            }
                         } // End of batch processing foreach loop
+                        
+                        // DEBUG: Log final batch processing summary
+                        if (_parent.Settings.DebugMode.Value)
+                        {
+                            DateTime finalEndTime = DateTime.Now;
+                            var totalProcessingTime = finalEndTime - batchProcessingStartTime;
+                            _parent.LogMessage($"🔍 DEBUG: All batches completed at {finalEndTime:HH:mm:ss.fff}");
+                            _parent.LogMessage($"🔍 DEBUG: Total batch processing time: {totalProcessingTime.TotalMilliseconds:F0}ms");
+                            _parent.LogMessage($"🔍 DEBUG: Processed {batchNumber}/{itemBatches.Count} batches successfully");
+                        }
                     } // End of if (wsResponse.New != null && wsResponse.New.Length > 0)
                 }
                 catch (JsonException parseEx)
